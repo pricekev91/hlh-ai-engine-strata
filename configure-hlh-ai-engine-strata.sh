@@ -84,7 +84,7 @@ if $BOOTSTRAP_INSIDE; then
 	apt-get install -y --no-install-recommends \
 		build-essential git cmake pkg-config \
 		python3 python3-venv python3-pip python3-dev \
-		unzip bc bc libopenblas-dev libssl-dev \
+		unzip bc libopenblas-dev libssl-dev \
 		openssh-server nvtop
 	# CUDA $CUDA_MAJOR repo (noble = ubuntu2404; CUDA 12.x = last with sm_70)
 	if [ ! -f /etc/apt/keyrings/cuda.gpg ]; then
@@ -96,10 +96,11 @@ if $BOOTSTRAP_INSIDE; then
 	fi
 	log "  - Installing CUDA $CUDA_MAJOR (sm_70 supported; CUDA 13 dropped Volta)"
 	apt-get install -y "cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION}"
-	# Driver-branch userspace, pinned exactly to the host kernel driver.
-	# R580 (580.65.06) is the last branch for Volta; host was installed via .run --dkms
-	# (580 is not in trixie non-free). 580 is NOT in the CUDA ubuntu2404 repo either,
-	# so resolve the exact version the repo carries for this branch and FATAL on mismatch.
+	# Driver-branch userspace, pinned to the host kernel driver. R580 (580.65.06) is the
+	# last branch for Volta; the host was installed via .run --dkms. The CUDA ubuntu2404
+	# repo carries several 580 point releases (580.65.06-0ubuntu1 ... 580.126.09-1ubuntu1),
+	# so resolve the repo version whose base matches the host driver base and FATAL if it
+	# is not there (NVML requires userspace base == host kernel driver base).
 	BRANCH_PKGS=(
 		"libnvidia-compute-${DRIVER_BRANCH}"
 		"libnvidia-cfg1-${DRIVER_BRANCH}"
@@ -108,39 +109,35 @@ if $BOOTSTRAP_INSIDE; then
 		"nvidia-utils-${DRIVER_BRANCH}"
 	)
 	log "  - Pinning userspace branch $DRIVER_BRANCH to host kernel driver $NVIDIA_DRIVER_VERSION (5 packages)"
-	RESOLVED_US=""
-	for p in "${BRANCH_PKGS[@]}"; do
-		v=$(apt-cache madison "$p" 2>/dev/null | awk -F'|' 'NR==1 {gsub(/ /,"",$2); print $2}')
-		if [ -z "$v" ]; then fatal "apt-cache madison: no version for $p (CUDA repo not updated?)" ; fi
-		log "    $p -> $v"
-		if [ -n "$RESOLVED_US" ] && [ "$v" != "$RESOLVED_US" ]; then
-			fatal "version mismatch across $DRIVER_BRANCH packages ($p=$v vs $RESOLVED_US)"
-		fi
-		RESOLVED_US="$v"
-	done
-	log "  - Resolved $DRIVER_BRANCH userspace: $RESOLVED_US"
-	if [ "$RESOLVED_US" != "$NVIDIA_DRIVER_VERSION" ]; then
-		fatal "userspace $RESOLVED_US != host kernel driver $NVIDIA_DRIVER_VERSION (NVML needs exact match; upgrade the host driver to $RESOLVED_US or re-pin and retry)"
+	RESOLVED_US="$(apt-cache madison "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null | awk -F'|' -v v="${NVIDIA_DRIVER_VERSION}" '{gsub(/[ \t]/,"",$2); if (index($2, v "-")==1) {print $2; exit}}' || true)"
+	if [ -z "$RESOLVED_US" ]; then
+		log "  Available ${DRIVER_BRANCH} userspace in CUDA repo:"
+		apt-cache madison "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null | awk -F'|' '{gsub(/ /,"",$2); print "    ", $2}' | head -10 || true
+		fatal "no ${NVIDIA_DRIVER_VERSION} userspace in CUDA ubuntu2404 repo (host driver ${NVIDIA_DRIVER_VERSION}); if the repo rotated, upgrade the host driver to the current 580 tip and re-run"
 	fi
+	log "  - Resolved $DRIVER_BRANCH userspace: $RESOLVED_US (base matches host driver $NVIDIA_DRIVER_VERSION)"
 	apt-mark unhold "${BRANCH_PKGS[@]}" 2>/dev/null || true
-	apt-get install -y --allow-downgrades --no-install-recommends \
+	if ! apt-get install -y --allow-downgrades --no-install-recommends \
 		"libnvidia-compute-${DRIVER_BRANCH}=${RESOLVED_US}" \
 		"libnvidia-cfg1-${DRIVER_BRANCH}=${RESOLVED_US}" \
 		"libnvidia-decode-${DRIVER_BRANCH}=${RESOLVED_US}" \
 		"libnvidia-gpucomp-${DRIVER_BRANCH}=${RESOLVED_US}" \
-		"nvidia-utils-${DRIVER_BRANCH}=${RESOLVED_US}"
-	# Strata needs no persistenced; drop it if the branch pulled it
+		"nvidia-utils-${DRIVER_BRANCH}=${RESOLVED_US}" 2>&1 | tail -n 30; then
+		fatal "pinned userspace ${RESOLVED_US} install failed (host driver ${NVIDIA_DRIVER_VERSION}) - do NOT fall back to unpinned: NVML needs the base version to match"
+	fi
+	# Strata needs no persistenced; drop it if the branch pulled it (it also blocks downgrades while held)
 	if dpkg -s nvidia-persistenced >/dev/null 2>&1; then
-		apt-mark unhold nvidia-persistenced 2>/dev/null || true
-		apt-get remove -y nvidia-persistenced 2>/dev/null || true
+		systemctl disable --now nvidia-persistenced 2>/dev/null || true
+		apt-mark unhold "${BRANCH_PKGS[@]}" 2>/dev/null || true
+		apt-get remove -y nvidia-persistenced 2>&1 | tail -n 5 || true
 	fi
 	apt-mark hold "${BRANCH_PKGS[@]}" 2>/dev/null || true
-	# FATAL gate: userspace must match the host kernel driver exactly (NVML requirement)
+	# FATAL gate: installed userspace base must match the host kernel driver base (NVML requirement)
 	US_VER=$(dpkg-query -W -f='${Version}' "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null || echo "missing")
-	if [ "$US_VER" != "$NVIDIA_DRIVER_VERSION" ]; then
+	if ! case "$US_VER" in "${NVIDIA_DRIVER_VERSION}-"*) true ;; *) false ;; esac; then
 		fatal "FATAL: libnvidia-compute-${DRIVER_BRANCH}=$US_VER but host kernel driver is $NVIDIA_DRIVER_VERSION (NVML version mismatch)"
 	fi
-	log "  - Userspace $US_VER matches host kernel driver $NVIDIA_DRIVER_VERSION (exact match required)"
+	log "  - Userspace $US_VER matches host kernel driver $NVIDIA_DRIVER_VERSION (NVML exact-base match required)"
 	# CUDA env for the user (systemd unit also sets it explicitly)
 	cat > /etc/profile.d/cuda.sh <<CUDAEOF
 export PATH=/usr/local/cuda-${CUDA_MAJOR}/bin:\$PATH
