@@ -1,0 +1,8 @@
+# Local tooling / editor
+.DS_Store
+*.swp
+.tools/
+
+# Secrets (not currently used by this repo)
+.hlh-secrets
+**/.hlh-secrets
