@@ -5,7 +5,16 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0-strata] - 2026-07-11
+## [1.0.1-strata] - 2026-10-01
+
+### Fixed
+
+- **`pveam install` → `pveam download local <template>`** — PVE 9.2 has no
+  `pveam install` subcommand (`pveam <COMMAND>`: download/available/list/remove/update).
+  Deploy `[1/7]` now downloads the template to `local` storage the correct way
+  and verifies the file landed.
+
+## [1.0.0-strata] - 2026-10-01
 
 ### Added
 

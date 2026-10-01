@@ -198,9 +198,11 @@ nvidia-smi 2>&1 | head -20 || true
 # --- 1/7 Template ---
 echo "[1/7] Ensuring LXC template ($TEMPLATE_FILE)..."
 if [ ! -f "/var/lib/vz/template/ct/${TEMPLATE_FILE}" ]; then
-	echo "  Template missing - updating repo index and installing (~1 GB)..."
+	echo "  Template missing - updating repo index and downloading (~1 GB)..."
 	pveam update
-	pveam install "$TEMPLATE_FILE" || { echo "ERROR: pveam install failed for $TEMPLATE_FILE" >&2; exit 1; }
+	# PVE 9.x: pveam download <storage> <template> (there is no 'pveam install')
+	pveam download local "$TEMPLATE_FILE" || { echo "ERROR: pveam download local $TEMPLATE_FILE failed" >&2; exit 1; }
+	[ -f "/var/lib/vz/template/ct/${TEMPLATE_FILE}" ] || { echo "ERROR: template not present after pveam download" >&2; exit 1; }
 fi
 echo "  Template present."
 
