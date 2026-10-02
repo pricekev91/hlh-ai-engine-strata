@@ -5,6 +5,30 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2-strata] - 2026-10-02
+
+### Fixed
+
+- **Silent bootstrap crash in `[1/6]` (CUDA repo key 404)** — the in-container
+  bootstrap fetched its GPG key from
+  `https://developer.download.nvidia.com/compute/cuda/12.8/keys/cuda-12.8_prod.asc`,
+  which now returns **404**. Because that `wget` ran with `-q` under
+  `set -euo pipefail`, the whole bootstrap died with **zero output** — the
+  deploy appeared to stop right after the base `apt-get install` finished.
+  Now uses the noble repo key
+  `https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub`
+  (verified to sign the ubuntu2404 repo's InRelease: "cudatools
+  <cudatools@nvidia.com>", RSA fingerprint EB69 3B30 35CD 5710 E231 E123
+  A4B4 6996 3BF8 63CC) and a `|| fatal` guard so any future key-fetch failure
+  prints a real error instead of dying silently.
+
+- **CUDA toolkit package name** — `cuda-toolkit-12.8=12.8.0-1` is not a valid
+  apt package on noble (would have been the *next* silent crash, after the key
+  fix, at `E: Unable to locate package`). The real metapackage is
+  `cuda-toolkit-12-8=12.8.0-1` (dashes, not dots). The script now derives it
+  from `$CUDA_MAJOR` (`cuda-toolkit-${CUDA_MAJOR//./-}`). Verified live against
+  the ubuntu2404 repo's Packages index.
+
 ## [1.0.1-strata] - 2026-10-01
 
 ### Fixed

@@ -88,14 +88,20 @@ if $BOOTSTRAP_INSIDE; then
 		openssh-server nvtop
 	# CUDA $CUDA_MAJOR repo (noble = ubuntu2404; CUDA 12.x = last with sm_70)
 	if [ ! -f /etc/apt/keyrings/cuda.gpg ]; then
-		wget -q "https://developer.download.nvidia.com/compute/cuda/${CUDA_MAJOR}/keys/cuda-${CUDA_MAJOR}_prod.asc" -O /tmp/cuda_prod.asc
+		# Noble repo key: verified to sign the ubuntu2404 repo's InRelease
+		# ("cudatools <cudatools@nvidia.com>"). The old URL
+		# /compute/cuda/<major>/keys/cuda-<major>_prod.asc 404s, and `wget -q`
+		# under set -euo pipefail then died with ZERO output (silent crash).
+		wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub" -O /tmp/cuda_prod.asc \
+			|| fatal "failed to download CUDA GPG key from https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub"
 		gpg --dearmor --yes --output /etc/apt/keyrings/cuda.gpg /tmp/cuda_prod.asc
 		rm -f /tmp/cuda_prod.asc
 		echo "deb [signed-by=/etc/apt/keyrings/cuda.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/ /" > /etc/apt/sources.list.d/cuda.list
 		apt-get update
 	fi
 	log "  - Installing CUDA $CUDA_MAJOR (sm_70 supported; CUDA 13 dropped Volta)"
-	apt-get install -y "cuda-toolkit-${CUDA_MAJOR}=${CUDA_VERSION}"
+	# Debian package name uses dashes, not dots: cuda-toolkit-12-8 (not cuda-toolkit-12.8)
+	apt-get install -y "cuda-toolkit-${CUDA_MAJOR//./-}=${CUDA_VERSION}"
 	# Driver-branch userspace, pinned to the host kernel driver. R580 (580.65.06) is the
 	# last branch for Volta; the host was installed via .run --dkms. The CUDA ubuntu2404
 	# repo carries several 580 point releases (580.65.06-0ubuntu1 ... 580.126.09-1ubuntu1),
