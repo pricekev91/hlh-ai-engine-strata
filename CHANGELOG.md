@@ -9,10 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`pveam install` → `pveam download local <template>`** — PVE 9.2 has no
-  `pveam install` subcommand (`pveam <COMMAND>`: download/available/list/remove/update).
-  Deploy `[1/7]` now downloads the template to `local` storage the correct way
-  and verifies the file landed.
+- **Template ensure (PVE 9.2)** — `[1/7]` used the nonexistent `pveam install`
+  and then a filesystem check on `/var/lib/vz/template/ct/` (that directory does
+  not exist on PVE 9.2; `local` vztmpl archives live under
+  `/var/lib/vz/template/cache/`). Now uses `pveam update && pveam download local
+  <template>` and verifies storage membership via `pveam list local`.
+  Verified live: template present at `local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst`.
+
+  PVE 9.2 `pct create` notes (already handled by the script): template is a
+  **positional** argument (`pct create <vmid> <ostemplate> ...`), the volume ID
+  carries the `vztmpl/` prefix, and there is **no `--name` parameter** (passing
+  one triggers a bogus `nameserver: invalid format` 400 on 9.2.20).
 
 ## [1.0.0-strata] - 2026-10-01
 

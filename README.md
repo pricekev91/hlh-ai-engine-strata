@@ -58,7 +58,7 @@ What that does, in order:
 1. `[0/7]` Host: verify R580 `580.65.06` + V100 (`nvidia-smi -L`, 32 GB),
    ensure `nvidia_uvm` persistence + UVM device nodes (installs them if absent;
    full `.run --dkms` path included for greenfield hosts).
-2. `[1/7]` Ensure the Ubuntu 24.04 LXC template (`pveam install` if missing).
+2. `[1/7]` Ensure the Ubuntu 24.04 LXC template is in `local` storage (`pveam update && pveam download local ...` if missing; verified via `pveam list local`).
 3. `[2/7]` Remove stale LXC 115 leftovers (`115.conf.bak.*`); confirm-delete a
    live 115 on redeploy (its `/srv/ai/models/strata` data survives).
 4. `[3/7]` **Free the V100**: stop LXC 111 (`hlh-ai-engine-egpu`) and set it to

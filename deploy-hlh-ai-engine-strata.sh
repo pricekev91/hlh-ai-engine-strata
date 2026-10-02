@@ -197,14 +197,16 @@ nvidia-smi 2>&1 | head -20 || true
 
 # --- 1/7 Template ---
 echo "[1/7] Ensuring LXC template ($TEMPLATE_FILE)..."
-if [ ! -f "/var/lib/vz/template/ct/${TEMPLATE_FILE}" ]; then
-	echo "  Template missing - updating repo index and downloading (~1 GB)..."
+# NOTE: PVE 9.2 stores local vztmpl archives under /var/lib/vz/template/cache/ (the
+# old ct/ dir does not exist) - check storage membership via 'pveam list', not paths.
+if ! pveam list local 2>/dev/null | grep -qF "$TEMPLATE_FILE"; then
+	echo "  Template not in local storage - updating index and downloading (~1 GB)..."
 	pveam update
 	# PVE 9.x: pveam download <storage> <template> (there is no 'pveam install')
 	pveam download local "$TEMPLATE_FILE" || { echo "ERROR: pveam download local $TEMPLATE_FILE failed" >&2; exit 1; }
-	[ -f "/var/lib/vz/template/ct/${TEMPLATE_FILE}" ] || { echo "ERROR: template not present after pveam download" >&2; exit 1; }
 fi
-echo "  Template present."
+pveam list local 2>/dev/null | grep -qF "$TEMPLATE_FILE" || { echo "ERROR: template $TEMPLATE_FILE not in local storage after pveam download" >&2; exit 1; }
+echo "  Template present (local:${TEMPLATE_FILE})."
 
 # --- 2/7 Stale LXC 115 leftovers ---
 echo "[2/7] Cleaning stale LXC ${LXC_ID} leftovers..."
