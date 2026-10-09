@@ -8,18 +8,29 @@ LXC_IP="192.168.1.15"
 usage() {
 	cat <<'EOF'
 Usage:
-	./configure-hlh-ai-engine-strata.sh [--lxc-id ID] [--host HOST] [--bootstrap-inside]
+	./configure-hlh-ai-engine-strata.sh [--lxc-id ID] [--host HOST] [--model M] [--gguf-dir DIR]
+	                                   [--bootstrap-inside]
 
-Strata path (Qwen3.8-Flash-Next IQ2_XS on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
+Strata path (Qwen3.8-Flash-Next on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	- host driver 580.65.06 (R580, last for Volta) already installed by
 	  deploy-hlh-ai-engine-strata.sh (or hlh-ai-engine-egpu's)
 	- container: CUDA $CUDA_MAJOR (sm_70 requires CUDA 12.x; 13 dropped sm_70) +
 	  driver-branch userspace 580.65.06 (apt-pinned to the host kernel driver)
 	- Strata at pinned commit (engine built -DSTRATA_EXPERIMENTAL_SM60=ON, sm_70
 	  community path, Strata #295/#236)
-	- IQ2_XS install (~68 GB download + pack) into /srv/ai/models/strata (shared
-	  host mount), 128K context, int8 KV, vision off
+	- model install (default IQ2_XS ~68 GB download + pack) into
+	  /srv/ai/models/strata (shared host mount), 128K context, int8 KV, vision off
 	- systemd strata.service on port 80 (web UI + OpenAI /v1 + Anthropic /v1/messages)
+
+Options:
+	--model M      Q2_0 | IQ2_XS (default) | IQ3_XXS | IQ3_S (Strata's sizes for
+	               Qwen3.8-Flash-Next). IQ3_XXS/IQ3_S experts (42.9/50.3 GB) do not
+	               fit 48 GB RAM + 10 GB beside in normal mode, so setup's
+	               --low-ram auto switches them to low-RAM mode: the 32 GB card
+	               holds the hot experts, RAM the rest.
+	--gguf-dir DIR use GGUF shards already in DIR (e.g. /srv/ai/models) instead of
+	               downloading them (needs every shard: -00001-of-00002 and
+	               -00002-of-00002; the ~5 GB MTP draft layer is still fetched)
 
 Host side (default): pushes this script into LXC and runs it with --bootstrap-inside.
 --bootstrap-inside: run the bootstrap directly inside the LXC (called by the deploy
@@ -30,17 +41,21 @@ EOF
 # --- PINNED VERSIONS (V100 Volta cc 7.0) ---
 # R580 580.65.06 = last driver supporting Volta (host kernel driver, installed via .run --dkms).
 # CUDA 12.8 = final toolkit with sm_70 (CUDA 13 dropped sm_60/sm_70; Strata needs CUDA 12.x).
-# Strata: v0.1.32 (sm60/slow-memory fixes #295, llama.cpp update #291).
+# Strata: v0.1.41 - the sm_70 experimental path is unchanged (STRATA_EXPERIMENTAL_SM60=1,
+# CUDA 12.x source build; 0.1.40.4: Volta code byte-identical to 0.1.40.3), and it carries
+# fixes this board relies on: RAM-resident prompts #1353, under-RAM Linux decode #1194,
+# the hung-engine watchdog #1317/#1407, the quoted-tool-call security fix (0.1.40.1).
 CUDA_VERSION="${CUDA_VERSION:-12.8.0-1}"
 CUDA_MAJOR="${CUDA_MAJOR:-12.8}"
 NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.65.06}"
 DRIVER_BRANCH="${DRIVER_BRANCH:-580}"
 STRATA_REPO="https://github.com/Niko1221/Strata.git"
-STRATA_COMMIT="${STRATA_COMMIT:-c499bd102e7a4135c0de389dcfe38c399759ccc8}"   # 0.1.32
+STRATA_COMMIT="${STRATA_COMMIT:-fb58e0dbc8399662c0e47c76578c6e878b14f6cf}"   # 0.1.41
 STRATA_DIR="/opt/strata"
 STRATA_MODEL_DIR="/srv/ai/models/strata"
 MODEL_FAMILY="qwen"
-MODEL_NAME="IQ2_XS"
+MODEL_NAME="IQ2_XS"        # --model: Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S
+GGUF_DIR=""                # --gguf-dir: pre-downloaded GGUF shards instead of the download
 STRATA_CONTEXT="131072"      # 128K - required (16K is unusable for this workload)
 STRATA_KV="int8"
 STRATA_VISION="no"
@@ -56,6 +71,8 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--lxc-id) TARGET_LXC_ID="$2"; shift 2 ;;
 		--host) HOST_IP="$2"; shift 2 ;;
+		--model) MODEL_NAME="$2"; shift 2 ;;
+		--gguf-dir) GGUF_DIR="$2"; shift 2 ;;
 		--bootstrap-inside) BOOTSTRAP_INSIDE=true; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "ERROR: Unknown option: $1" >&2; usage; exit 1 ;;
@@ -113,8 +130,9 @@ if $BOOTSTRAP_INSIDE; then
 		"libnvidia-decode-${DRIVER_BRANCH}"
 		"libnvidia-gpucomp-${DRIVER_BRANCH}"
 		"nvidia-utils-${DRIVER_BRANCH}"
+		"nvidia-persistenced"
 	)
-	log "  - Pinning userspace branch $DRIVER_BRANCH to host kernel driver $NVIDIA_DRIVER_VERSION (5 packages)"
+	log "  - Pinning userspace branch $DRIVER_BRANCH to host kernel driver $NVIDIA_DRIVER_VERSION (6 packages, persistenced kept: libnvidia-compute Depends on it)"
 	RESOLVED_US="$(apt-cache madison "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null | awk -F'|' -v v="${NVIDIA_DRIVER_VERSION}" '{gsub(/[ \t]/,"",$2); if (index($2, v "-")==1) {print $2; exit}}' || true)"
 	if [ -z "$RESOLVED_US" ]; then
 		log "  Available ${DRIVER_BRANCH} userspace in CUDA repo:"
@@ -122,40 +140,76 @@ if $BOOTSTRAP_INSIDE; then
 		fatal "no ${NVIDIA_DRIVER_VERSION} userspace in CUDA ubuntu2404 repo (host driver ${NVIDIA_DRIVER_VERSION}); if the repo rotated, upgrade the host driver to the current 580 tip and re-run"
 	fi
 	log "  - Resolved $DRIVER_BRANCH userspace: $RESOLVED_US (base matches host driver $NVIDIA_DRIVER_VERSION)"
+	# Clean broken NVML symlinks left by the pre-1.0.3 bootstrap (it created
+	# .so.1 -> .so backwards, and a .so.<ver> -> .so link shadowing the real lib).
+	# Only remove symlinks, never the real library file: on a healthy system
+	# libnvidia-ml.so.<ver> is a regular file and .so.1 -> .so.<ver> is correct.
+	if [ -L /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 ] && [ ! -e /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 ]; then
+		rm -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>/dev/null || true
+	fi
+	if [ -L "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.${NVIDIA_DRIVER_VERSION}" ]; then
+		rm -f "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.${NVIDIA_DRIVER_VERSION}" 2>/dev/null || true
+	fi
 	apt-mark unhold "${BRANCH_PKGS[@]}" 2>/dev/null || true
 	if ! apt-get install -y --allow-downgrades --no-install-recommends \
 		"libnvidia-compute-${DRIVER_BRANCH}=${RESOLVED_US}" \
 		"libnvidia-cfg1-${DRIVER_BRANCH}=${RESOLVED_US}" \
 		"libnvidia-decode-${DRIVER_BRANCH}=${RESOLVED_US}" \
 		"libnvidia-gpucomp-${DRIVER_BRANCH}=${RESOLVED_US}" \
-		"nvidia-utils-${DRIVER_BRANCH}=${RESOLVED_US}" 2>&1 | tail -n 30; then
+		"nvidia-utils-${DRIVER_BRANCH}=${RESOLVED_US}" \
+		"nvidia-persistenced=${RESOLVED_US}" 2>&1 | tail -n 30; then
 		fatal "pinned userspace ${RESOLVED_US} install failed (host driver ${NVIDIA_DRIVER_VERSION}) - do NOT fall back to unpinned: NVML needs the base version to match"
 	fi
-	# Strata needs no persistenced; drop it if the branch pulled it (it also blocks downgrades while held)
-	if dpkg -s nvidia-persistenced >/dev/null 2>&1; then
-		systemctl disable --now nvidia-persistenced 2>/dev/null || true
-		apt-mark unhold "${BRANCH_PKGS[@]}" 2>/dev/null || true
-		apt-get remove -y nvidia-persistenced 2>&1 | tail -n 5 || true
-	fi
+	# KEEP nvidia-persistenced installed but disabled. libnvidia-compute-580
+	# Depends: nvidia-persistenced, so `apt-get remove` also removes
+	# libnvidia-compute + libnvidia-decode (which provide libnvidia-ml.so.1)
+	# and upgrades the remaining 580 packages to the repo tip (observed:
+	# 580.65.06 -> 580.178.04 + compute/decode removed -> nvidia-smi
+	# "couldn't find libnvidia-ml.so"). Disabling the service is sufficient in
+	# an LXC (the host owns persistence mode).
+	systemctl disable --now nvidia-persistenced 2>/dev/null || true
 	apt-mark hold "${BRANCH_PKGS[@]}" 2>/dev/null || true
-	# FATAL gate: installed userspace base must match the host kernel driver base (NVML requirement)
+	# FATAL gate: EVERY pinned userspace package base must match the host kernel
+	# driver base (NVML requirement). Checking only libnvidia-compute masked the
+	# 2026-10-09 failure where compute stayed 580.65.06 while cfg1/gpucomp/utils
+	# drifted to 580.178.04.
+	for _pkg in "${BRANCH_PKGS[@]}"; do
+		_us_ver=$(dpkg-query -W -f='${Version}' "$_pkg" 2>/dev/null || echo "missing")
+		_us_stat=$(dpkg-query -W -f='${Status}' "$_pkg" 2>/dev/null || echo "missing")
+		case "$_us_ver" in
+			"${NVIDIA_DRIVER_VERSION}-"*) ;;
+			*) fatal "FATAL: ${_pkg}=${_us_ver} but host kernel driver is $NVIDIA_DRIVER_VERSION (NVML version mismatch; all 580 userspace must share the base)" ;;
+		esac
+		case "$_us_stat" in
+			*"ok installed"*) ;;
+			*) fatal "FATAL: ${_pkg} status is '${_us_stat}' (not fully installed; NVML libs missing)" ;;
+		esac
+	done
 	US_VER=$(dpkg-query -W -f='${Version}' "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null || echo "missing")
-	if ! case "$US_VER" in "${NVIDIA_DRIVER_VERSION}-"*) true ;; *) false ;; esac; then
-		fatal "FATAL: libnvidia-compute-${DRIVER_BRANCH}=$US_VER but host kernel driver is $NVIDIA_DRIVER_VERSION (NVML version mismatch)"
-	fi
-	log "  - Userspace $US_VER matches host kernel driver $NVIDIA_DRIVER_VERSION (NVML exact-base match required)"
+	log "  - Userspace $US_VER matches host kernel driver $NVIDIA_DRIVER_VERSION (NVML exact-base match required, all 6 packages verified)"
 	# CUDA env for the user (systemd unit also sets it explicitly)
 	cat > /etc/profile.d/cuda.sh <<CUDAEOF
 export PATH=/usr/local/cuda-${CUDA_MAJOR}/bin:\$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_MAJOR}/lib64:\$LD_LIBRARY_PATH
 CUDAEOF
-	# Host nvidia-smi (from deploy push at /tmp/nvidia-smi) + NVML
-	if [ -f /tmp/nvidia-smi ]; then
+	# nvidia-smi: prefer the deb's binary (nvidia-utils-580, same pinned base as
+	# libnvidia-ml.so.1). The host .run binary pushed to /tmp/nvidia-smi is only
+	# a fallback for a missing/broken deb binary -- blindly overwriting a working
+	# deb binary gains nothing (both are 580.65.06 here) and hides version drift.
+	if [ ! -x /usr/bin/nvidia-smi ] && [ -f /tmp/nvidia-smi ]; then
 		cp /tmp/nvidia-smi /usr/bin/nvidia-smi
 		chmod +x /usr/bin/nvidia-smi
 	fi
-	ln -sf /usr/lib/x86_64-linux-gnu/libnvidia-ml.so /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>/dev/null || true
-	ln -sf /usr/lib/x86_64-linux-gnu/libnvidia-ml.so /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.65.06 2>/dev/null || true
+	# NVML symlinks: dpkg already ships libnvidia-ml.so.1 -> libnvidia-ml.so.<ver>
+	# (verified live). Only repair a missing/dangling .so.1, in the correct
+	# direction (versioned file is real, .so.1 is the link). Never create
+	# .so.1 -> libnvidia-ml.so (bare .so does not exist in the deb layout).
+	if [ -f "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.${NVIDIA_DRIVER_VERSION}" ]; then
+		if [ ! -e /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 ]; then
+			ln -sf "libnvidia-ml.so.${NVIDIA_DRIVER_VERSION}" /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>/dev/null || true
+		fi
+		ldconfig 2>/dev/null || true
+	fi
 
 	# --- 2/6 Verify GPU + nvcc ---
 	log "[2/6] Verifying GPU + CUDA toolkit inside container..."
@@ -172,7 +226,7 @@ CUDAEOF
 	log "  GPU + CUDA $CUDA_MAJOR (sm_70) verified inside LXC."
 
 	# --- 3/6 Strata source at pinned commit ---
-	log "[3/6] Checking out Strata at pinned commit ${STRATA_COMMIT:0:7} (0.1.32)..."
+	log "[3/6] Checking out Strata at pinned commit ${STRATA_COMMIT:0:7} (0.1.41)..."
 	if [ -d "$STRATA_DIR/.git" ]; then
 		git -C "$STRATA_DIR" fetch --depth 1 origin "$STRATA_COMMIT" 2>/dev/null || git -C "$STRATA_DIR" fetch --unshallow 2>/dev/null || true
 		git -C "$STRATA_DIR" checkout -q "$STRATA_COMMIT"
@@ -192,36 +246,53 @@ CUDAEOF
 	log "      STRATA_EXPERIMENTAL_SM60=1 -> builds -DSTRATA_EXPERIMENTAL_SM60=ON (Volta sm_70 community path)"
 	cd "$STRATA_DIR"
 	export STRATA_EXPERIMENTAL_SM60=1
-	./setup.sh --setup \
-		--family "$MODEL_FAMILY" \
-		--model "$MODEL_NAME" \
-		--context "$STRATA_CONTEXT" \
-		--kv "$STRATA_KV" \
-		--vision "$STRATA_VISION" \
-		--gpu "$STRATA_GPU" \
-		--port "$STRATA_PORT" \
-		--host "$STRATA_HOST" \
-		--data-dir "$STRATA_MODEL_DIR" \
-		--low-ram auto \
-		--no-start \
-		--yes
+	SETUP_ARGS=(--setup
+		--family "$MODEL_FAMILY"
+		--model "$MODEL_NAME"
+		--context "$STRATA_CONTEXT"
+		--kv "$STRATA_KV"
+		--vision "$STRATA_VISION"
+		--gpu "$STRATA_GPU"
+		--port "$STRATA_PORT"
+		--host "$STRATA_HOST"
+		--data-dir "$STRATA_MODEL_DIR"
+		--low-ram auto
+		--no-start
+		--yes)
+	if [ -n "$GGUF_DIR" ]; then
+		log "      --gguf-dir ${GGUF_DIR} (using pre-downloaded shards, no model download)"
+		SETUP_ARGS+=(--gguf-dir "$GGUF_DIR")
+	fi
+	./setup.sh "${SETUP_ARGS[@]}"
 	log "  Strata setup complete."
 
 	# --- 5/6 systemd unit ---
 	log "[5/6] Installing strata.service (port $STRATA_PORT)..."
-	# Config JSON written by setup: /opt/strata/strata-<family-tag>.json (qwen -> strata-.json)
+	# Config JSON written by setup: /opt/strata/strata-<family-tag><model>.json lowercased
+	# (the qwen family tag is empty: IQ2_XS -> strata-iq2_xs.json). Prefer the exact name,
+	# fall back to a case-insensitive content match (older checkouts named it differently);
+	# *.shared-settings.json (0.1.41+) is the server's chat settings, not a model config.
+	EXPECTED_CFG="$STRATA_DIR/strata-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]').json"
 	CFG_JSON=""
-	for f in "$STRATA_DIR"/strata-*.json; do
-		[ -f "$f" ] || continue
-		if grep -q "$MODEL_NAME" "$f" 2>/dev/null; then CFG_JSON="$f"; break; fi
-		[ -z "$CFG_JSON" ] && CFG_JSON="$f"
-	done
-	[ -n "$CFG_JSON" ] || fatal "no Strata config JSON found in $STRATA_DIR (setup did not finish?)"
+	if [ -f "$EXPECTED_CFG" ]; then
+		CFG_JSON="$EXPECTED_CFG"
+	else
+		for f in "$STRATA_DIR"/strata-*.json; do
+			[ -f "$f" ] || continue
+			case "$f" in *.shared-settings.json) continue ;; esac
+			if grep -qi "$MODEL_NAME" "$f" 2>/dev/null; then CFG_JSON="$f"; break; fi
+		done
+	fi
+	[ -n "$CFG_JSON" ] || fatal "no Strata config for ${MODEL_NAME} found in $STRATA_DIR (setup did not finish?)"
 	log "  Using config: $CFG_JSON"
 	cat > /etc/systemd/system/strata.service <<UNITEOF
 [Unit]
 Description=Strata AI Engine (Qwen3.8-Flash-Next ${MODEL_NAME}, ${STRATA_CONTEXT} ctx) - CUDA ${CUDA_MAJOR} sm_70 EXPERIMENTAL build on Tesla V100 32GB, port ${STRATA_PORT}
 After=network.target
+# Explicit restart budget (systemd's implicit default is 5 starts in 10 s): with
+# RestartSec=10 a crash-loop gets 60 s before the unit goes to failed state.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -250,8 +321,9 @@ UNITEOF
 		journalctl -u strata -n 30 --no-pager 2>/dev/null || true
 		fatal "strata.service failed to start"
 	fi
-	# IQ2_XS: ~35.5 GB of experts copied into RAM + dense weights on GPU. 1-3 min,
-	# longer the first time (page cache cold on the ZFS mount).
+	# Model load: IQ2_XS copies ~35.5 GB of experts into RAM + dense weights on GPU,
+	# 1-3 min, longer the first time (page cache cold on the ZFS mount); IQ3_XXS/IQ3_S
+	# run in low-RAM mode here and load longer still (15 min window below = warning).
 	READY=0
 	for i in $(seq 1 90); do
 		if curl -fsS -m 5 "http://127.0.0.1:${STRATA_PORT}/health" >/dev/null 2>&1; then READY=1; break; fi
@@ -274,7 +346,7 @@ UNITEOF
 	echo ""
 	echo "  Strata web UI + API : http://${LXC_IP}:${STRATA_PORT}  (OpenAI /v1, Anthropic /v1/messages)"
 	echo "  Model               : Qwen3.8-Flash-Next ${MODEL_NAME} (${STRATA_CONTEXT} ctx, ${STRATA_KV} KV, vision off)"
-	echo "  Model data          : ${STRATA_MODEL_DIR} (shared host mount, ~68 GB download + pack)"
+	echo "  Model data          : ${STRATA_MODEL_DIR} (shared host mount, download + pack)"
 	echo "  Engine              : ${STRATA_DIR}/engine (sm_70 EXPERIMENTAL, CUDA ${CUDA_MAJOR})"
 	echo "  Service             : systemctl status strata / journalctl -u strata -f"
 	echo ""
@@ -290,7 +362,7 @@ fi
 log() { echo "[configure-strata] $*"; }
 fatal() { log "ERROR: $*" >&2; exit 1; }
 
-log "Configuring Strata in LXC ${TARGET_LXC_ID} (${HOST_IP}) - CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, IQ2_XS..."
+log "Configuring Strata in LXC ${TARGET_LXC_ID} (${HOST_IP}) - CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, ${MODEL_NAME}..."
 command -v pct >/dev/null 2>&1 || fatal "pct not found. Run on Proxmox host."
 
 if ! pct status "${TARGET_LXC_ID}" >/dev/null 2>&1; then
@@ -309,7 +381,7 @@ fi
 log "Pushing configure script into LXC via pct exec..."
 pct exec "${TARGET_LXC_ID}" -- mkdir -p /root/strata-bootstrap
 pct push "${TARGET_LXC_ID}" "${SCRIPT_DIR}/configure-hlh-ai-engine-strata.sh" /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --perms 0755
-log "  (CUDA $CUDA_MAJOR + userspace ${DRIVER_BRANCH}/${NVIDIA_DRIVER_VERSION} + Strata pinned ${STRATA_COMMIT:0:7} + IQ2_XS ~68 GB + systemd strata.service)"
+log "  (CUDA $CUDA_MAJOR + userspace ${DRIVER_BRANCH}/${NVIDIA_DRIVER_VERSION} + Strata pinned ${STRATA_COMMIT:0:7} + ${MODEL_NAME} + systemd strata.service)"
 log "  This is the long step: engine compile ~10-40 min + model download + pack."
 pct push "${TARGET_LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
 log "Running bootstrap inside LXC (pct exec)..."
