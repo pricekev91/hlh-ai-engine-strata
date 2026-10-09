@@ -11,26 +11,30 @@ Usage:
 	./configure-hlh-ai-engine-strata.sh [--lxc-id ID] [--host HOST] [--model M] [--gguf-dir DIR]
 	                                   [--bootstrap-inside]
 
-Strata path (Qwen3.8-Flash-Next on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
+Strata path (Qwen3.8-Flash-Next IQ3_S on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	- host driver 580.65.06 (R580, last for Volta) already installed by
 	  deploy-hlh-ai-engine-strata.sh (or hlh-ai-engine-egpu's)
 	- container: CUDA $CUDA_MAJOR (sm_70 requires CUDA 12.x; 13 dropped sm_70) +
 	  driver-branch userspace 580.65.06 (apt-pinned to the host kernel driver)
 	- Strata at pinned commit (engine built -DSTRATA_EXPERIMENTAL_SM60=ON, sm_70
 	  community path, Strata #295/#236)
-	- model install (default IQ2_XS ~68 GB download + pack) into
-	  /srv/ai/models/strata (shared host mount), 128K context, int8 KV, vision off
+	- model install (default IQ3_S from LOCAL GGUF shards in /srv/ai/models,
+	  no ~84 GB download + pack) into /srv/ai/models/strata (shared host
+	  mount), 128K context, int8 KV, vision off
 	- systemd strata.service on port 80 (web UI + OpenAI /v1 + Anthropic /v1/messages)
 
 Options:
-	--model M      Q2_0 | IQ2_XS (default) | IQ3_XXS | IQ3_S (Strata's sizes for
+	--model M      Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S (default, Strata's sizes for
 	               Qwen3.8-Flash-Next). IQ3_XXS/IQ3_S experts (42.9/50.3 GB) do not
 	               fit 48 GB RAM + 10 GB beside in normal mode, so setup's
 	               --low-ram auto switches them to low-RAM mode: the 32 GB card
 	               holds the hot experts, RAM the rest.
-	--gguf-dir DIR use GGUF shards already in DIR (e.g. /srv/ai/models) instead of
-	               downloading them (needs every shard: -00001-of-00002 and
-	               -00002-of-00002; the ~5 GB MTP draft layer is still fetched)
+	--gguf-dir DIR use GGUF shards already in DIR (default /srv/ai/models)
+	               instead of downloading them (needs every shard:
+	               Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf (52G) and
+	               -00002-of-00002.gguf (27G) from ISTA-DASLab/
+	               Qwen3.8-Flash-Next-GSQ-RCO-GGUF:IQ3_S; the ~5 GB MTP draft
+	               layer is still fetched)
 
 Host side (default): pushes this script into LXC and runs it with --bootstrap-inside.
 --bootstrap-inside: run the bootstrap directly inside the LXC (called by the deploy
@@ -54,8 +58,14 @@ STRATA_COMMIT="${STRATA_COMMIT:-fb58e0dbc8399662c0e47c76578c6e878b14f6cf}"   # 0
 STRATA_DIR="/opt/strata"
 STRATA_MODEL_DIR="/srv/ai/models/strata"
 MODEL_FAMILY="qwen"
-MODEL_NAME="IQ2_XS"        # --model: Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S
-GGUF_DIR=""                # --gguf-dir: pre-downloaded GGUF shards instead of the download
+# Exact model under test (on disk in /srv/ai/models, no download):
+# ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:IQ3_S
+#   Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf (52G, 54817524224 B)
+#   Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf (27G, 28800138432 B)
+# (--model/--gguf-dir override both; the merged 78G single file is for llama.cpp,
+# Strata's --gguf-dir takes the split pair, not the merged file.)
+MODEL_NAME="${MODEL_NAME:-IQ3_S}"        # --model: Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S
+GGUF_DIR="${GGUF_DIR:-/srv/ai/models}"   # --gguf-dir: local GGUF shards, no model download
 STRATA_CONTEXT="131072"      # 128K - required (16K is unusable for this workload)
 STRATA_KV="int8"
 STRATA_VISION="no"
@@ -239,13 +249,26 @@ CUDAEOF
 	log "  Strata: $(git -C "$STRATA_DIR" describe --tags 2>/dev/null || echo "${STRATA_COMMIT:0:12}")"
 	mkdir -p "$STRATA_MODEL_DIR"
 
-	# --- 4/6 Strata setup: build engine (sm_70 EXPERIMENTAL) + IQ2_XS install ---
+	# --- 4/6 Strata setup: build engine (sm_70 EXPERIMENTAL) + IQ3_S local install ---
 	# This is the long step: venv + pinned deps, llama.cpp fetch, engine compile
-	# (~10-40 min on 12 cores), ~68 GB model download + pack, config + run script.
+	# (~10-40 min on 12 cores), pack from LOCAL GGUF shards (no ~84 GB download;
+	# only the ~5 GB MTP draft layer is fetched), config + run script.
 	log "[4/6] Strata setup (family=${MODEL_FAMILY} model=${MODEL_NAME} context=${STRATA_CONTEXT} kv=${STRATA_KV} vision=${STRATA_VISION} gpu=${STRATA_GPU} port=${STRATA_PORT})..."
 	log "      STRATA_EXPERIMENTAL_SM60=1 -> builds -DSTRATA_EXPERIMENTAL_SM60=ON (Volta sm_70 community path)"
 	cd "$STRATA_DIR"
 	export STRATA_EXPERIMENTAL_SM60=1
+	# Pre-flight: local shards must exist BEFORE the long engine build, or setup
+	# would compile for ~40 min and then fail on a missing download. Strata
+	# resolves --gguf-dir by exact published first-shard name, then expects every
+	# -0000i-of-0000N shard beside it (gguf_dir_shards in setup.py).
+	if [ -n "$GGUF_DIR" ]; then
+		GGUF_STEM="Qwen3.8-Flash-Next-GSQ-RCO-${MODEL_NAME}"
+		for _i in 00001 00002; do
+			_shard="${GGUF_DIR}/${GGUF_STEM}-${_i}-of-00002.gguf"
+			[ -s "$_shard" ] || fatal "--gguf-dir ${GGUF_DIR} is missing ${_shard##*/} (have: $(ls "$GGUF_DIR" 2>/dev/null | grep -c gguf || echo 0) ggufs; need both -00001-of-00002 and -00002-of-00002 for ${MODEL_NAME})"
+		done
+		log "      local shards OK: $(du -sh "${GGUF_DIR}/${GGUF_STEM}-00001-of-00002.gguf" | awk '{print $1}') + $(du -sh "${GGUF_DIR}/${GGUF_STEM}-00002-of-00002.gguf" | awk '{print $1}') (no model download)"
+	fi
 	SETUP_ARGS=(--setup
 		--family "$MODEL_FAMILY"
 		--model "$MODEL_NAME"
@@ -381,10 +404,17 @@ fi
 log "Pushing configure script into LXC via pct exec..."
 pct exec "${TARGET_LXC_ID}" -- mkdir -p /root/strata-bootstrap
 pct push "${TARGET_LXC_ID}" "${SCRIPT_DIR}/configure-hlh-ai-engine-strata.sh" /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --perms 0755
-log "  (CUDA $CUDA_MAJOR + userspace ${DRIVER_BRANCH}/${NVIDIA_DRIVER_VERSION} + Strata pinned ${STRATA_COMMIT:0:7} + ${MODEL_NAME} + systemd strata.service)"
-log "  This is the long step: engine compile ~10-40 min + model download + pack."
+log "  (CUDA $CUDA_MAJOR + userspace ${DRIVER_BRANCH}/${NVIDIA_DRIVER_VERSION} + Strata pinned ${STRATA_COMMIT:0:7} + ${MODEL_NAME} from ${GGUF_DIR:-download} + systemd strata.service)"
+log "  This is the long step: engine compile ~10-40 min + pack from local shards (no model download; ~5 GB MTP draft fetched)."
 pct push "${TARGET_LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
 log "Running bootstrap inside LXC (pct exec)..."
-pct exec "${TARGET_LXC_ID}" -- bash /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --bootstrap-inside
+# Forward model choices: the pushed script re-parses its own argv inside the LXC,
+# so --model/--gguf-dir must be passed explicitly or the bootstrap silently falls
+# back to compiled-in defaults after the push.
+INNER_ARGS=(--bootstrap-inside --model "$MODEL_NAME")
+if [ -n "$GGUF_DIR" ]; then
+	INNER_ARGS+=(--gguf-dir "$GGUF_DIR")
+fi
+pct exec "${TARGET_LXC_ID}" -- bash /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh "${INNER_ARGS[@]}"
 log "Strata configuration complete. LXC ${TARGET_LXC_ID} at ${HOST_IP}."
 log "Verify: pct exec ${TARGET_LXC_ID} -- systemctl status strata && curl -s http://${HOST_IP}:${STRATA_PORT}/health"
