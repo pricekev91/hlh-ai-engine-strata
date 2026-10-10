@@ -5,6 +5,38 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3-strata] - 2026-10-10
+
+### Changed
+
+- **Model shards moved to SSD (greenfield parity).** On 2026-10-09 the live CT
+  115 was fixed by hand: the 78 GB IQ3_S GGUF shard pair was moved from the
+  RaidZ1-6TB HDD pool (model load/pack crawled) to the SSD pool, and the repo
+  was NOT updated — a rebuild would have regressed straight back to the slow
+  HDD location. The IaC now reproduces the fast layout from scratch:
+  - `deploy`: `[4/7]` ensures ZFS dataset `rpool/strata-models` (mountpoint
+    `/strata-models`, override pool with `SSD_POOL=...`) and idempotently seeds
+    the IQ3_S shard pair onto it (copies from `/srv/ai/models` if not already
+    on SSD). LXC 115 is created with **`mp1 /strata-models,mp=/srv/ssd-models`**
+    beside the existing `mp0 /srv/ai/models`.
+  - `configure`: `--gguf-dir` now defaults to **`/srv/ssd-models`** (SSD bind)
+    instead of `/srv/ai/models` (HDD). Packs/MTP/tokenizer stay on
+    `/srv/ai/models/strata` (`mp0`) — matches the validated live config, and
+    the SSD dataset has no headroom for a second 78 GB copy.
+  - Docs (README exec summary, quick start, deployment model, rebuild notes)
+    updated to the shards-on-SSD / packs-on-HDD split; model references
+    corrected IQ2_XS → IQ3_S (the 1.0.2-era default change was never
+    reflected in the README).
+
+### Notes
+
+- Since 1.0.2 (see git log): default model is IQ3_S from local shards, and the
+  580 userspace pinning was hardened (base-match resolution + 6-package FATAL
+  gate).
+- The 78 GB IQ3_S shards + merged `IQ3_S.gguf` still sit on RaidZ1-6TB under
+  `/srv/ai/models` as the seed source; delete them only if you no longer want
+  a rebuild to be download-free.
+
 ## [1.0.2-strata] - 2026-10-02
 
 ### Fixed

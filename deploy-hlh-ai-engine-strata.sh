@@ -16,11 +16,14 @@ Strata path (Qwen3.8-Flash-Next IQ2_XS on Tesla V100 GV100GL 32GB via OCuLink) -
 	4) FREE THE V100: stop hlh-ai-engine-egpu (LXC 111, llama.cpp) + onboot 0
 	   (Strata and llama.cpp both want the 32 GB of VRAM; 111's config is kept intact
 	    for revert: pct set 111 --onboot 1 && pct start 111)
-	5) Create privileged LXC 115 (hlh-ai-engine-strata) at 192.168.1.15
+	5) Ensure SSD model dataset (rpool/strata-models -> /strata-models) + seed the
+	   IQ3_S GGUF shard pair onto it (from the HDD copy if present), then create
+	   privileged LXC 115 (hlh-ai-engine-strata) at 192.168.1.15 with mp0 + mp1
 	6) Add cgroup + /dev/nvidia* bind-mounts for single GV100 (c5:00.0)
 	7) Start container + push/run Strata bootstrap
 	   (CUDA 12.8 + engine build sm_70 EXPERIMENTAL -DSTRATA_EXPERIMENTAL_SM60=ON
-	    + IQ2_XS install ~68 GB download + systemd strata.service on :80)
+	    + IQ3_S pack from LOCAL SSD shards, no model download
+	    + systemd strata.service on :80)
 
 NOTES:
 	- V100 is Volta (cc 7.0). Strata's upstream engine needs cc 7.5+; the sm_70 build is
@@ -28,9 +31,13 @@ NOTES:
 	  REQUIRES a CUDA 12.x toolkit (CUDA 13 dropped sm_60/sm_70).
 	- Host driver: R580 580.65.06 (last supporting Volta) on proxmox-kernel-6.14.11-9-pve
 	  (6.17+ breaks 550/580 closed DKMS). Install path mirrors hlh-ai-engine-egpu.
-	- Model storage: same /srv/ai/models bind mount as hlh-ai-engine-egpu; Strata keeps
-	  its own subfolder /srv/ai/models/strata (packed shards, not GGUFs).
-	- First bootstrap is long: engine compile ~10-40 min + ~68 GB model download + pack.
+	- Model storage: the 78 GB IQ3_S GGUF shard pair is read from the SSD dataset
+	  rpool/strata-models (host /strata-models -> LXC /srv/ssd-models, mp1). The
+	  RaidZ1-6TB HDD pool was too slow (validated live 2026-10-09: fast on SSD).
+	  Strata keeps its packed model + MTP + tokenizer in /srv/ai/models/strata
+	  (mp0, same shared mount as hlh-ai-engine-egpu).
+	- First bootstrap is long: engine compile ~10-40 min + pack from local SSD shards
+	  (no model download; shards auto-seeded to the SSD dataset from /srv/ai/models).
 EOF
 }
 
@@ -68,6 +75,15 @@ TEMPLATE_FILE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 POOL="RaidZ1-6TB"
 MODEL_HOST_DIR="/srv/ai/models"
 MODEL_LXC_DIR="/srv/ai/models"
+# --- SSD model shards (mp1) ---
+# The 78 GB IQ3_S shard pair on the RaidZ1-6TB HDD pool crawled (model load/pack
+# was unbearably slow). Shards now live on rpool (prox01's local SSD pool) in
+# dataset strata-models, bind-mounted into the CT as /srv/ssd-models (mp1).
+# Validated live on LXC 115 2026-10-09. Override the pool with SSD_POOL=...
+SSD_POOL="${SSD_POOL:-rpool}"
+SSD_DATASET="${SSD_POOL}/strata-models"
+MODEL_SSD_HOST_DIR="/strata-models"
+MODEL_SSD_LXC_DIR="/srv/ssd-models"
 LXC_ROOTFS_SIZE="64"
 # IQ2_XS: ~35.5 GB of experts in RAM + ~10 GB beside (Strata's own math: fits 48 GB).
 # 48 GB is the max sensible limit for this model on a 64 GB host (more buys nothing:
@@ -77,7 +93,7 @@ LXC_CORES="12"
 LXC_SWAP="512"
 LXC_IP_CONFIG="192.168.1.15/24"
 LXC_GATEWAY="192.168.1.1"
-LXC_DESC="Strata AI engine (Qwen3.8-Flash-Next IQ2_XS, 128K ctx) - CUDA $CUDA_MAJOR sm_70 EXPERIMENTAL build (-DSTRATA_EXPERIMENTAL_SM60=ON) + driver $NVIDIA_DRIVER_VERSION_SHORT for Tesla V100 (GV100 32GB cc 7.0) via OCuLink c5:00.0, model storage on $POOL:/srv/ai/models/strata, port 80"
+LXC_DESC="Strata AI engine (Qwen3.8-Flash-Next IQ3_S, 128K ctx) - CUDA $CUDA_MAJOR sm_70 EXPERIMENTAL build (-DSTRATA_EXPERIMENTAL_SM60=ON) + driver $NVIDIA_DRIVER_VERSION_SHORT for Tesla V100 (GV100 32GB cc 7.0) via OCuLink c5:00.0, model shards on $SSD_DATASET (SSD) -> /srv/ssd-models, packs on $POOL:/srv/ai/models/strata, port 80"
 
 # LXC 111 = hlh-ai-engine-egpu (llama.cpp, same V100). Stopped at cutover.
 EGPU_LXC_ID=111
@@ -212,7 +228,7 @@ echo "  Template present (local:${TEMPLATE_FILE})."
 echo "[2/7] Cleaning stale LXC ${LXC_ID} leftovers..."
 rm -f "/etc/pve/lxc/${LXC_ID}.conf.bak."* 2>/dev/null || true
 if pct status "${LXC_ID}" >/dev/null 2>&1; then
-	confirm "hlh-ai-engine-strata (LXC ${LXC_ID}) already exists. Delete it and redeploy? (its /srv/ai/models/strata data on ${POOL} survives)"
+	confirm "hlh-ai-engine-strata (LXC ${LXC_ID}) already exists. Delete it and redeploy? (its /srv/ai/models/strata packs on ${POOL} and SSD shards on ${SSD_DATASET} survive)"
 	echo "[2/7] Deleting existing LXC ${LXC_ID}..."
 	pct stop "${LXC_ID}" >/dev/null 2>&1 || true
 	pct destroy "${LXC_ID}"
@@ -238,7 +254,34 @@ else
 	fi
 fi
 
-# --- 4/7 Create LXC ---
+# --- 4/7 SSD model dataset + Create LXC ---
+echo "[4/7] Ensuring SSD model dataset ${SSD_DATASET} (mountpoint ${MODEL_SSD_HOST_DIR})..."
+command -v zfs >/dev/null 2>&1 || { echo "ERROR: zfs not found - cannot ensure ${SSD_DATASET}" >&2; exit 1; }
+if ! zfs list "$SSD_DATASET" >/dev/null 2>&1; then
+	echo "  Creating ${SSD_DATASET} on SSD pool ${SSD_POOL}..."
+	zfs create -o mountpoint="$MODEL_SSD_HOST_DIR" "$SSD_DATASET" \
+		|| { echo "ERROR: zfs create $SSD_DATASET failed (does SSD pool ${SSD_POOL} exist? override with SSD_POOL=<pool>)" >&2; exit 1; }
+fi
+mkdir -p "${MODEL_SSD_HOST_DIR}"
+# Seed the IQ3_S shard pair onto the SSD (idempotent): skip when already there,
+# copy from the HDD model dir when present; otherwise the bootstrap pre-flight
+# fatals with a clear missing-shard message.
+GGUF_STEM="Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"
+for _i in 00001 00002; do
+	_f="${GGUF_STEM}-${_i}-of-00002.gguf"
+	if [ -s "${MODEL_SSD_HOST_DIR}/${_f}" ]; then
+		echo "  SSD shard present: ${_f}"
+	elif [ -s "${MODEL_HOST_DIR}/${_f}" ]; then
+		echo "  Seeding ${_f} from ${MODEL_HOST_DIR} (78 GB total, HDD -> SSD, a few minutes)..."
+		if command -v rsync >/dev/null 2>&1; then
+			rsync -a --info=progress2 "${MODEL_HOST_DIR}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
+		else
+			cp "${MODEL_HOST_DIR}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
+		fi
+	else
+		echo "WARNING: ${_f} found on neither ${MODEL_SSD_HOST_DIR} nor ${MODEL_HOST_DIR} - bootstrap will fatal unless shards are provided" >&2
+	fi
+done
 echo "[4/7] Creating privileged Ubuntu LXC (${LXC_ID}, ${LXC_NAME}) on ${POOL}..."
 mkdir -p "${MODEL_HOST_DIR}"
 chown 0:0 "${MODEL_HOST_DIR}"
@@ -255,6 +298,7 @@ pct create "${LXC_ID}" "${LXC_IMAGE}" \
 	--unprivileged 0 \
 	--onboot 1 \
 	--mp0 "${MODEL_HOST_DIR},mp=${MODEL_LXC_DIR}" \
+	--mp1 "${MODEL_SSD_HOST_DIR},mp=${MODEL_SSD_LXC_DIR}" \
 	--description "${LXC_DESC}"
 
 # --- 5/7 V100 CUDA passthrough ---
@@ -289,8 +333,8 @@ if [[ "$NO_BOOTSTRAP" == "true" ]]; then
 	echo "[6/7] Skipping bootstrap (--no-bootstrap). Run later:"
 	echo "  ./configure-hlh-ai-engine-strata.sh"
 else
-	echo "[6/7] Running in-container Strata bootstrap (CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, IQ2_XS ~68 GB)..."
-	echo "      This is the long step: engine compile ~10-40 min + model download + pack."
+	echo "[6/7] Running in-container Strata bootstrap (CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, IQ3_S from local SSD shards)..."
+	echo "      This is the long step: engine compile ~10-40 min + pack from SSD shards (no model download)."
 	pct exec "${LXC_ID}" -- mkdir -p /root/strata-bootstrap
 	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --perms 0755
 	pct push "${LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
@@ -315,7 +359,8 @@ fi
 echo ""
 echo "Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) at ${LXC_IP_CONFIG%%/*}."
 echo "  Strata web UI + API : http://192.168.1.15:80   (OpenAI /v1, Anthropic /v1/messages)"
-echo "  Model data          : ${MODEL_HOST_DIR}/strata (host) <-> ${MODEL_LXC_DIR}/strata (LXC) on ${POOL}"
+echo "  Model shards (SSD)  : ${MODEL_SSD_HOST_DIR} (${SSD_DATASET}) <-> ${MODEL_SSD_LXC_DIR} (LXC)"
+echo "  Model packs         : ${MODEL_HOST_DIR}/strata (host) <-> ${MODEL_LXC_DIR}/strata (LXC) on ${POOL}"
 echo "  Strata source       : /opt/strata (pinned commit, engine in /opt/strata/engine)"
 echo "  V100 freed from     : LXC ${EGPU_LXC_ID} (hlh-ai-engine-egpu, stopped, onboot 0, config intact)"
 echo "  Host driver pinned  : $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"

@@ -18,8 +18,8 @@ Strata path (Qwen3.8-Flash-Next IQ3_S on Tesla V100 GV100GL 32GB via OCuLink) - 
 	  driver-branch userspace 580.65.06 (apt-pinned to the host kernel driver)
 	- Strata at pinned commit (engine built -DSTRATA_EXPERIMENTAL_SM60=ON, sm_70
 	  community path, Strata #295/#236)
-	- model install (default IQ3_S from LOCAL GGUF shards in /srv/ai/models,
-	  no ~84 GB download + pack) into /srv/ai/models/strata (shared host
+	- model install (default IQ3_S from LOCAL GGUF shards in /srv/ssd-models (SSD
+	  bind, mp1; no ~84 GB download + pack) into /srv/ai/models/strata (shared host
 	  mount), 128K context, int8 KV, vision off
 	- systemd strata.service on port 80 (web UI + OpenAI /v1 + Anthropic /v1/messages)
 
@@ -29,7 +29,9 @@ Options:
 	               fit 48 GB RAM + 10 GB beside in normal mode, so setup's
 	               --low-ram auto switches them to low-RAM mode: the 32 GB card
 	               holds the hot experts, RAM the rest.
-	--gguf-dir DIR use GGUF shards already in DIR (default /srv/ai/models)
+	--gguf-dir DIR use GGUF shards already in DIR (default /srv/ssd-models, the
+	               SSD bind mp1 - RaidZ1 HDD reads were too slow for the 78 GB
+	               pair; pass --gguf-dir /srv/ai/models to use the HDD copies)
 	               instead of downloading them (needs every shard:
 	               Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf (52G) and
 	               -00002-of-00002.gguf (27G) from ISTA-DASLab/
@@ -58,14 +60,16 @@ STRATA_COMMIT="${STRATA_COMMIT:-fb58e0dbc8399662c0e47c76578c6e878b14f6cf}"   # 0
 STRATA_DIR="/opt/strata"
 STRATA_MODEL_DIR="/srv/ai/models/strata"
 MODEL_FAMILY="qwen"
-# Exact model under test (on disk in /srv/ai/models, no download):
+# Exact model under test (on disk in /srv/ssd-models (SSD bind), no download):
 # ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:IQ3_S
 #   Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf (52G, 54817524224 B)
 #   Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf (27G, 28800138432 B)
 # (--model/--gguf-dir override both; the merged 78G single file is for llama.cpp,
 # Strata's --gguf-dir takes the split pair, not the merged file.)
 MODEL_NAME="${MODEL_NAME:-IQ3_S}"        # --model: Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S
-GGUF_DIR="${GGUF_DIR:-/srv/ai/models}"   # --gguf-dir: local GGUF shards, no model download
+# Shards default to the SSD bind (mp1, host rpool/strata-models -> /strata-models).
+# RaidZ1-6TB HDD reads of the 78 GB pair were too slow; SSD validated live 2026-10-09.
+GGUF_DIR="${GGUF_DIR:-/srv/ssd-models}"  # --gguf-dir: local GGUF shards, no model download
 STRATA_CONTEXT="131072"      # 128K - required (16K is unusable for this workload)
 STRATA_KV="int8"
 STRATA_VISION="no"
@@ -265,7 +269,7 @@ CUDAEOF
 		GGUF_STEM="Qwen3.8-Flash-Next-GSQ-RCO-${MODEL_NAME}"
 		for _i in 00001 00002; do
 			_shard="${GGUF_DIR}/${GGUF_STEM}-${_i}-of-00002.gguf"
-			[ -s "$_shard" ] || fatal "--gguf-dir ${GGUF_DIR} is missing ${_shard##*/} (have: $(ls "$GGUF_DIR" 2>/dev/null | grep -c gguf || echo 0) ggufs; need both -00001-of-00002 and -00002-of-00002 for ${MODEL_NAME})"
+			[ -s "$_shard" ] || fatal "--gguf-dir ${GGUF_DIR} is missing ${_shard##*/} (have: $(ls "$GGUF_DIR" 2>/dev/null | grep -c gguf || echo 0) ggufs; need both -00001-of-00002 and -00002-of-00002 for ${MODEL_NAME}; seed them on the SSD dataset (host: /strata-models, copied by the deploy script) or pass --gguf-dir /srv/ai/models for the HDD copies)"
 		done
 		log "      local shards OK: $(du -sh "${GGUF_DIR}/${GGUF_STEM}-00001-of-00002.gguf" | awk '{print $1}') + $(du -sh "${GGUF_DIR}/${GGUF_STEM}-00002-of-00002.gguf" | awk '{print $1}') (no model download)"
 	fi
@@ -345,7 +349,8 @@ UNITEOF
 		fatal "strata.service failed to start"
 	fi
 	# Model load: IQ2_XS copies ~35.5 GB of experts into RAM + dense weights on GPU,
-	# 1-3 min, longer the first time (page cache cold on the ZFS mount); IQ3_XXS/IQ3_S
+	# 1-3 min, longer the first time (page cache cold; shards now read from the SSD
+	# bind /srv/ssd-models, which is what made this board fast); IQ3_XXS/IQ3_S
 	# run in low-RAM mode here and load longer still (15 min window below = warning).
 	READY=0
 	for i in $(seq 1 90); do
@@ -369,7 +374,8 @@ UNITEOF
 	echo ""
 	echo "  Strata web UI + API : http://${LXC_IP}:${STRATA_PORT}  (OpenAI /v1, Anthropic /v1/messages)"
 	echo "  Model               : Qwen3.8-Flash-Next ${MODEL_NAME} (${STRATA_CONTEXT} ctx, ${STRATA_KV} KV, vision off)"
-	echo "  Model data          : ${STRATA_MODEL_DIR} (shared host mount, download + pack)"
+	echo "  Model shards        : ${GGUF_DIR} (SSD bind mp1, host rpool/strata-models) - no download"
+	echo "  Model packs         : ${STRATA_MODEL_DIR} (shared host mount, pack output)"
 	echo "  Engine              : ${STRATA_DIR}/engine (sm_70 EXPERIMENTAL, CUDA ${CUDA_MAJOR})"
 	echo "  Service             : systemctl status strata / journalctl -u strata -f"
 	echo ""

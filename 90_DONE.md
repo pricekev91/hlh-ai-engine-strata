@@ -11,9 +11,13 @@ This is what is already implemented and verified in this repository.
   24.04 noble, 12 cores, 48 GB RAM, 512 MB swap, 64 GB rootfs on `RaidZ1-6TB`,
   `nesting=1,keyctl=1,fuse=1`, `onboot 1`, static IP `192.168.1.15/24` gw `.1`
   on `vmbr0`.
-- Model storage same path host and CT: `RaidZ1-6TB/ai/models` → `/srv/ai/models`
-  via `mp0`; Strata data in its own `/srv/ai/models/strata` subfolder (packed
-  shards, ~68 GB IQ2_XS + pack), survives LXC rebuilds.
+- Model storage split (validated live 2026-10-09, greenfield since 1.0.3):
+  - **Shards on SSD**: `rpool/strata-models` (host `/strata-models`) → CT
+    `/srv/ssd-models` via `mp1`. The 78 GB IQ3_S pair on the RaidZ1-6TB HDD
+    pool was too slow; deploy `[4/7]` creates the dataset and seeds the shards.
+  - **Packs on HDD**: `RaidZ1-6TB/ai/models` → `/srv/ai/models` via `mp0`;
+    Strata data in its own `/srv/ai/models/strata` subfolder (packed shards,
+    MTP, tokenizer), survives LXC rebuilds.
 
 ## V100 CUDA Passthrough (sm_70 experimental)
 
@@ -34,7 +38,8 @@ This is what is already implemented and verified in this repository.
 
 ## Model + Service
 
-- Qwen3.8-Flash-Next **IQ2_XS**, 128 K context (required), int8 KV, vision
+- Qwen3.8-Flash-Next **IQ3_S** (default since 2026-10-09; packed from local
+  SSD shards, no download), 128 K context (required), int8 KV, vision
   off, GPU 0, port 80, host 0.0.0.0 — web UI + OpenAI `/v1` + Anthropic
   `/v1/messages`, drop-in for the old llama.cpp :80 endpoint.
 - systemd `strata.service` (WorkingDirectory /opt/strata,

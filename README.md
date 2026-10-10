@@ -1,7 +1,7 @@
 # HLH AI Engine — Strata (V100 OCuLink, LXC 115)
 
 This repo provisions `hlh-ai-engine-strata` — the Strata AI engine running
-**Qwen3.8-Flash-Next IQ2_XS** on the **Tesla V100 (GV100GL, 32 GB HBM2, compute
+**Qwen3.8-Flash-Next IQ3_S** on the **Tesla V100 (GV100GL, 32 GB HBM2, compute
 capability 7.0 / Volta)** attached to `prox01` via the OCuLink slot (`c5:00.0`),
 as privileged **LXC 115** at **`192.168.1.15`**.
 
@@ -25,8 +25,9 @@ stops LXC 111 (`hlh-ai-engine-egpu`, llama.cpp, Qwen3.8-27B) and sets it to
 | Host driver | R580 `580.65.06` (last branch supporting Volta) on `6.14.11-9-pve` (6.17+ breaks 550/580 closed DKMS) |
 | CUDA | **12.8** (final toolkit with sm_70; CUDA 13 dropped sm_60/sm_70) |
 | Engine | **Strata 0.1.32** pinned `c499bd1`, built from source **`-DSTRATA_EXPERIMENTAL_SM60=ON`** (Volta community path, Strata #295/#236) |
-| Model | Qwen3.8-Flash-Next **IQ2_XS** — ~35.5 GB of MoE experts in RAM, dense weights on GPU, 128 K context, int8 KV, vision off |
-| Model storage | `/srv/ai/models/strata` (host `RaidZ1-6TB/ai/models` → LXC `/srv/ai/models/strata`, same-path bind `mp0`) |
+| Model | Qwen3.8-Flash-Next **IQ3_S** — low-RAM mode (32 GB card holds the hot experts, RAM the rest), 128 K context, int8 KV, vision off |
+| Model shards | `/srv/ssd-models` (host **`rpool/strata-models`** on the **SSD pool** → LXC `/srv/ssd-models`, bind `mp1`) — the 78 GB IQ3_S pair on the RaidZ1-6TB HDD pool was too slow; SSD is fast (validated live 2026-10-09) |
+| Model packs | `/srv/ai/models/strata` (host `RaidZ1-6TB/ai/models` → LXC `/srv/ai/models/strata`, same-path bind `mp0`) — packed model, MTP, tokenizer |
 | API | **port 80**: web UI + OpenAI `/v1` + Anthropic `/v1/messages` (drop-in replacement for the old `:80` llama.cpp endpoint) |
 | Supersedes | LXC 111 `hlh-ai-engine-egpu` (llama.cpp) — stopped + `onboot 0` at cutover, config intact |
 
@@ -63,8 +64,12 @@ What that does, in order:
    live 115 on redeploy (its `/srv/ai/models/strata` data survives).
 4. `[3/7]` **Free the V100**: stop LXC 111 (`hlh-ai-engine-egpu`) and set it to
    `onboot 0` (config kept; revert = `pct set 111 --onboot 1 && pct start 111`).
-5. `[4/7]` Create LXC 115: privileged, 12 cores, 48 GB RAM, 64 GB rootfs on
-   `RaidZ1-6TB`, `mp0 /srv/ai/models`, IP `192.168.1.15/24` gw `.1`, `onboot 1`.
+5. `[4/7]` Ensure the SSD dataset `rpool/strata-models` (mountpoint
+   `/strata-models`) and seed the IQ3_S shard pair onto it (idempotent; copies
+   from `/srv/ai/models` if not already on SSD). Then create LXC 115:
+   privileged, 12 cores, 48 GB RAM, 64 GB rootfs on `RaidZ1-6TB`,
+   `mp0 /srv/ai/models` + `mp1 /strata-models → /srv/ssd-models`,
+   IP `192.168.1.15/24` gw `.1`, `onboot 1`.
 6. `[5/7]` GPU passthrough (same pattern as 111): cgroup allows
    `c 195:*/507:*/508:*/510:*/511:* rwm` + bind mounts of `/dev/nvidia*`
    (`nvidia0`, `nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`, `nvidia-modeset`).
@@ -73,11 +78,12 @@ What that does, in order:
    - CUDA 12.8 toolkit + driver-branch userspace **apt-pinned to `580.65.06`**
      (exact-match FATAL gate — NVML requires userspace == host kernel driver),
    - Strata 0.1.32 at pinned `c499bd1` → `/opt/strata`,
-   - `STRATA_EXPERIMENTAL_SM60=1 ./setup.sh --setup --family qwen --model IQ2_XS
+   - `STRATA_EXPERIMENTAL_SM60=1 ./setup.sh --setup --family qwen --model IQ3_S
      --context 131072 --kv int8 --vision no --gpu 0 --port 80 --host 0.0.0.0
-     --data-dir /srv/ai/models/strata --low-ram auto --no-start --yes`
+     --data-dir /srv/ai/models/strata --gguf-dir /srv/ssd-models --low-ram auto
+     --no-start --yes`
      (venv + pinned deps, llama.cpp fetch, **engine compile ~10–40 min**,
-     **~68 GB model download + pack**, config JSON + run script),
+     **pack from local SSD shards — no model download**; ~5 GB MTP draft fetched),
    - `strata.service` (systemd, port 80, `LimitMEMLOCK=infinity` for the
      page-locked expert arena) enabled + started.
 8. `[7/7]` Verify `strata.service` active + `/health` (first model load takes
@@ -101,7 +107,7 @@ Useful flags:
 | CUDA | 12.8 | 12.8 (sm_70 experimental build) |
 | GPU wiring | cgroup + `/dev/nvidia*` bind | identical |
 | Host driver | 580.65.06 | identical (shared) |
-| Model dir | `/srv/ai/models` (GGUFs) | `/srv/ai/models/strata` (own subfolder, packed) |
+| Model dir | `/srv/ai/models` (GGUFs) | shards `/srv/ssd-models` (SSD `mp1`), packs `/srv/ai/models/strata` (`mp0`) |
 | Port | 80 | 80 (drop-in after cutover) |
 | Status | **stopped, `onboot 0` at cutover** | active |
 
@@ -155,6 +161,7 @@ hlh-ai-engine-strata/
   wiring simultaneously — VRAM (32 GB) is the shared resource, so don't run
   both loaded at once.
 - **Rebuild 115**: re-run `./deploy-hlh-ai-engine-strata.sh --yes`. Model data
-  in `/srv/ai/models/strata` survives (it's on the ZFS mount, not the rootfs),
-  so the second run skips the 68 GB download (Strata setup detects existing
-  shards).
+  survives: packs in `/srv/ai/models/strata` (ZFS mount) and the IQ3_S shard
+  pair in `rpool/strata-models` (SSD). `[4/7]` re-seeds the SSD dataset from
+  `/srv/ai/models` if the shards are missing, and the bootstrap packs from the
+  local SSD shards — no model download.
