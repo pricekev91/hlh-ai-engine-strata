@@ -8,7 +8,9 @@ This is what is already implemented and verified in this repository.
   `deploy-hlh-ai-engine-strata.sh` (host) + `configure-hlh-ai-engine-strata.sh`
   (bootstrap).
 - LXC 115 `hlh-ai-engine-strata` privileged on `prox01` (192.168.1.10), Ubuntu
-  24.04 noble, 12 cores, 48 GB RAM, 512 MB swap, 64 GB rootfs on `RaidZ1-6TB`,
+  24.04 noble, 12 cores, 55 GB RAM (bumped from 48 GB 2026-10-10: CT ran at
+  its cgroup limit; extra headroom feeds the mmap expert page cache), 512 MB
+  swap, 64 GB rootfs on `RaidZ1-6TB`,
   `nesting=1,keyctl=1,fuse=1`, `onboot 1`, static IP `192.168.1.15/24` gw `.1`
   on `vmbr0`.
 - Model storage split (validated live 2026-10-09, greenfield since 1.0.3):

@@ -20,7 +20,7 @@ stops LXC 111 (`hlh-ai-engine-egpu`, llama.cpp, Qwen3.8-27B) and sets it to
 | LXC ID / hostname | `115` / `hlh-ai-engine-strata` |
 | IP / FQDN | `192.168.1.15` / `hlh-ai-engine-strata.mizertech.net` |
 | OS / type | Ubuntu 24.04 (noble), privileged, `nesting=1,keyctl=1,fuse=1` |
-| Resources | 12 cores, **48 GB RAM** (IQ2_XS fits 48 GB per Strata's own math), 512 MB swap, 64 GB rootfs (`RaidZ1-6TB`) |
+| Resources | 12 cores, **55 GB RAM** (26.7 GiB pinned experts + runtime + mmap page-cache headroom — see RAM sizing), 512 MB swap, 64 GB rootfs (`RaidZ1-6TB`) |
 | GPU | **Tesla V100 GV100GL 32 GB** (`c5:00.0`, `10de:1df0`, cc 7.0) via OCuLink — single chip, `nvidia0` |
 | Host driver | R580 `580.65.06` (last branch supporting Volta) on `6.14.11-9-pve` (6.17+ breaks 550/580 closed DKMS) |
 | CUDA | **12.8** (final toolkit with sm_70; CUDA 13 dropped sm_60/sm_70) |
@@ -42,10 +42,13 @@ stops LXC 111 (`hlh-ai-engine-egpu`, llama.cpp, Qwen3.8-27B) and sets it to
   (CUDA 13 dropped sm_70). Community-tested, not upstream-benchmarked:
   expect well under the 50–95 tok/s README numbers (this board also runs on a
   Gen3 x2 link, 8 GT/s).
-- IQ2_XS in normal mode needs ~35.5 GB of experts in RAM + ~10 GB beside →
-  the 48 GB LXC limit. Low-RAM (resident) mode is the fallback if RAM is
-  ever reclaimed for other LXCs (32 GB card holds the hot experts, RAM holds
-  the rest).
+- IQ3_S runs in **low-RAM (resident) mode**: the 32 GB card holds the hot
+  experts + dense + KV, RAM holds the pinned complement (~26.7 GiB) and the
+  page cache for the mmap'd expert files. RAM sizing (validated live
+  2026-10-10): at 48 GB the CT sits at its cgroup limit and the OS re-reads
+  experts from SSD (13M+ major faults); **55 GB** gives the mmap cache more
+  headroom while leaving ~6 GiB on the 61 GiB host for PVE, CT 109 and the
+  small VM. Do not start 111/112/113 alongside.
 
 ## Quick Start
 
@@ -67,7 +70,7 @@ What that does, in order:
 5. `[4/7]` Ensure the SSD dataset `rpool/strata-models` (mountpoint
    `/strata-models`) and seed the IQ3_S shard pair onto it (idempotent; copies
    from `/srv/ai/models` if not already on SSD). Then create LXC 115:
-   privileged, 12 cores, 48 GB RAM, 64 GB rootfs on `RaidZ1-6TB`,
+   privileged, 12 cores, 55 GB RAM, 64 GB rootfs on `RaidZ1-6TB`,
    `mp0 /srv/ai/models` + `mp1 /strata-models → /srv/ssd-models`,
    IP `192.168.1.15/24` gw `.1`, `onboot 1`.
 6. `[5/7]` GPU passthrough (same pattern as 111): cgroup allows

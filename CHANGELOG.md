@@ -5,6 +5,29 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4-strata] - 2026-10-10
+
+### Changed
+
+- **LXC 115 memory 48 GB -> 55 GB.** Discovery on the live CT (2026-10-10):
+  `memory.current == memory.max` (47.0/47.0 GiB) - the CT was AT its cgroup
+  limit, not 30% idle. Strata pins ~26.7 GiB of experts page-locked
+  (`--resident-experts` complement of the GPU cache) + ~2.7 GiB runtime; the
+  remaining ~18 GiB is page cache for the mmap'd 78 GB expert GGUFs, and the
+  engine log showed it evicting model cache to pin the tier plus 13M+ major
+  faults / 73 GB of expert re-reads from SSD while serving. The extra 7 GB
+  goes to that mmap cache (tier sizes are set by VRAM + model, not by RAM).
+  Host budget (prox01, 61.9 GiB physical, no swap): leaves ~6.9 GiB for
+  PVE/host (~4.5 GiB incl. kernel), CT 109 hlh-docker (cap 4, actual ~1) and
+  VM 103 pbs4 (cap 4, actual ~1.1); ZFS ARC already capped at 6 GiB. CT115's
+  non-reclaimable tier is fixed at ~29.4 GiB regardless of the cap (pinned
+  experts are sized by the model, not the limit), so the raise cannot cause a
+  host OOM - under PBS-backup/docker bursts the kernel reclaims ~5-6 GiB of
+  CT115 expert page cache instead. 52 GiB would be the conservative pick;
+  55 chosen deliberately to use all the headroom available.
+  NOTE: IaC-only change; the live CT 115 still has 48 GB until rebuilt or
+  `pct set 115 --memory 56320` (plus a reboot/balloon to take effect).
+
 ## [1.0.3-strata] - 2026-10-10
 
 ### Changed

@@ -85,10 +85,14 @@ SSD_DATASET="${SSD_POOL}/strata-models"
 MODEL_SSD_HOST_DIR="/strata-models"
 MODEL_SSD_LXC_DIR="/srv/ssd-models"
 LXC_ROOTFS_SIZE="64"
-# IQ2_XS: ~35.5 GB of experts in RAM + ~10 GB beside (Strata's own math: fits 48 GB).
-# 48 GB is the max sensible limit for this model on a 64 GB host (more buys nothing:
-# the expert arena is fixed and the rest of the model lives in VRAM).
-LXC_MEMORY="49152"
+# RAM sizing (IQ3_S, --resident-experts low-RAM mode; validated live 2026-10-10):
+# Strata pins ~26.7 GiB of experts page-locked in RAM (the complement of the GPU
+# cache) + ~2.7 GiB runtime. The rest of the allocation is page cache for the
+# mmap'd 78 GB expert GGUFs - at 48 GB the CT ran at its cgroup limit and the OS
+# re-read experts from SSD constantly (13M+ major faults). 55 GB gives the mmap
+# cache ~7 GB more headroom. Host is 61 GiB: leaves ~6 GiB for host/PVE,
+# CT 109 (hlh-docker) and the small VM - do not start 111/112/113 alongside.
+LXC_MEMORY="56320"
 LXC_CORES="12"
 LXC_SWAP="512"
 LXC_IP_CONFIG="192.168.1.15/24"
