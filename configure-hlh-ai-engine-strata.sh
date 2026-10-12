@@ -316,12 +316,14 @@ CUDAEOF
 	[ -n "$CFG_JSON" ] || fatal "no Strata config for ${MODEL_NAME} found in $STRATA_DIR (setup did not finish?)"
 	log "  Using config: $CFG_JSON"
 
-	# --- Phase 1 tuning flags (3phase-tunning.md) ---
+	# --- Phase 1+2 tuning flags (3phase-tunning.md) ---
 	# setup.sh writes the base args; these engine flags are NOT setup.sh options,
 	# so patch them into the config JSON's args array (idempotent):
+	# Phase 1:
 	#   --kv-grow                 KV takes VRAM only for cells requests actually
 	#                             reach (typ. ~30k, not the 131k cap) -> slots back
-	#                             to the expert cache (needs --expert-profile)
+	#                             to the expert cache (needs --expert-profile;
+	#                             engine may auto-off it on this config - harmless)
 	#   --prefill auto:16384      bigger prompt chunks amortize expert streaming
 	#                             over more rows (2-4x prefill expected)
 	#   --adapt-async 1           RAM<->VRAM expert swaps advance between verify
@@ -329,7 +331,20 @@ CUDAEOF
 	#   --expert-profile-save     learn the VRAM tier from real routing; saved on
 	#                             QUIT and every 10 min between requests, then
 	#                             pre-filled at start via the existing --expert-profile
-	log "  Applying Phase 1 tuning flags to $CFG_JSON..."
+	# Phase 2:
+	#   --pool-workers 10         CPU expert pool: default picked 8 workers + host
+	#                             on the 12-core allocation; 10 serves cache misses
+	#                             faster (host thread drains too = 11 on 12 cores)
+	#   --lookup-chain 2          after MTP drafts, add up to 2 prompt-lookup
+	#                             drafts; window grows to 8 where repeats are likely
+	#   --prompt-cache-tail       one extra checkpoint near the prompt's end
+	#                             (needs --prompt-cache + --prompt-cache-every,
+	#                             both on by default: 6 / 16384)
+	#   --conversation-cache-mib  park conversation state in RAM for fast session
+	#                             restore (default 0 = off). 4096, not the doc's
+	#                             8192: CT is 57 GB with ~29.3 pinned + runtime;
+	#                             8 GB would squeeze the expert page cache.
+	log "  Applying Phase 1+2 tuning flags to $CFG_JSON..."
 	"$STRATA_DIR/.venv/bin/python" - "$CFG_JSON" "$STRATA_DIR/data/expert-profile.bin" <<'PYEOF'
 import json, sys
 p, profile = sys.argv[1], sys.argv[2]
@@ -347,9 +362,14 @@ if "--kv-grow" not in a:
 set_pair("--adapt-async", "1")
 set_pair("--expert-profile-save", profile)
 set_pair("--expert-profile-save-every", "10")
+set_pair("--pool-workers", "10")
+set_pair("--lookup-chain", "2")
+if "--prompt-cache-tail" not in a:
+    a.append("--prompt-cache-tail")
+set_pair("--conversation-cache-mib", "4096")
 json.dump(cfg, open(p, "w"), indent=1)
 PYEOF
-	log "  Phase 1 flags: $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['args']))" "$CFG_JSON" 2>/dev/null || echo 'see config')"
+	log "  Phase 1+2 flags: $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['args']))" "$CFG_JSON" 2>/dev/null || echo 'see config')"
 
 	cat > /etc/systemd/system/strata.service <<UNITEOF
 [Unit]
