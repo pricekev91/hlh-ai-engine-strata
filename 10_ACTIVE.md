@@ -27,11 +27,13 @@ Active items in progress. These are the current focus areas.
 - [x] Fix before cutover (`3phase-tunning.md` §3.4) — DONE 2026-10-12:
   `GGUF_STEM` parameterized via `--model`/`MODEL_QUANT` (Q2_0|IQ2_XS|IQ3_XXS|IQ3_S),
   `avail >= pair + 8G` capacity gate added, `LXC_MEMORY` 56320 -> **58320** (live).
-- [ ] A/B IQ3_XXS vs IQ3_S on the same 2–3 OpenCode session replay; log the
-  numbers in `90_DONE.md`. Reference to beat: decode 41.8–47.5 tok/s, expert
-  hit rate 89.7%, 12,598 slots, 29.33 GiB pinned RAM. IQ3_XXS first-boot
-  reference (cold, 2026-10-12): 15,658 slots, elastic KV on, adapt-async off,
-  29.6 tok/s / 86.9% on a 58-token probe — expect both to climb warm.
+- [x] A/B verdict 2026-10-12: **reverted to IQ3_S** (intelligence over speed).
+  IQ3_XXS measured slower — decode 39.0 tok/s warm vs 41.8–47.5, prefill
+  80 tok/s on a 4.6k prompt vs 367–779 — despite 15,658 slots and 96.8–97.4%
+  hit rate; the smaller quant's CPU dequant cost outweighs its PCIe savings
+  on 12 cores. Rollback ~15 min (SSD re-seed + cold load 580 s); service
+  restored from `strata.service.bak-iq3_s`, XXS config/unit kept as
+  `strata-iq3_xxs.json(.bak-base)` / `strata.service.bak-iq3_xxs`.
 
 ## This Week
 

@@ -5,6 +5,17 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-12
+
+### Changed (Phase 3 item 10 verdict — revert to IQ3_S)
+
+- **Model IQ3_XXS -> IQ3_S** (intelligence over speed): XXS benchmarked
+  slower (decode 39.0 warm vs 41.8–47.5; prefill 80 vs 367–779 tok/s on
+  ~4k prompts) despite more slots / higher hit rate. SSD pair swapped back,
+  `strata.service` restored from `bak-iq3_s` (Phase 1+2 flags intact),
+  `/health` = `qwen3.8-flash-next-iq3_s` after 580 s cold load. XXS pack
+  (`packs/iq3_xxs`, ~43 GB) and HDD shards kept for now.
+
 ## [0.4.0] - 2026-10-12
 
 ### Changed (Phase 3 item 10 — IQ3_XXS cutover, 3phase-tunning.md §3.3)
