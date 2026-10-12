@@ -123,11 +123,11 @@ Measured on real traffic after restart:
 
 ## Phase 3 — model + hardware
 
-**STATUS: IN PROGRESS 2026-10-12.** Item 10 (IQ3_XXS A/B) is underway: the shard
-pair finishes downloading to prox01 at ~00:31 EDT; the cutover itself is the next
-step. Everything below is the live state + the cutover runbook, because the swap
-needs a service restart and a storage move that cannot be done while the engine
-is serving.
+**STATUS: download COMPLETE 2026-10-12 00:30 EDT — cutover pending.** Item 10
+(IQ3_XXS A/B) is staged on the HDD pool; the swap itself is the next step.
+Everything below is the live state + the cutover runbook, because the swap needs
+a service restart and a storage move that cannot be done while the engine is
+serving.
 
 ### 3.1 Item 10 — IQ3_XXS A/B (in flight)
 
@@ -135,7 +135,7 @@ Why: IQ3_XXS experts are **42.9 GB vs 50.3 GB IQ3_S** (`packs/iq3_s/experts.bin`
 measures 50,292,326,400 B). ~7.4 GB less expert state to page over the 3.3 GB/s
 OCuLink link is the biggest remaining decode lever, at a modest quality cost.
 
-Live download (prox01, host root, captured 2026-10-12 00:21 EDT):
+Download that ran (prox01, host root, 2026-10-12 00:01–00:30 EDT):
 
 ```
 PID 836774  started Mon Oct 12 00:01:25 EDT
@@ -149,13 +149,13 @@ PID 836774  started Mon Oct 12 00:01:25 EDT
 | `Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf` | 28,800,138,432 B (26.8 GiB) | same size as the IQ3_S shard 2 — it is the `--ple-gguf` side, quant-independent |
 | **Pair total** | **75,839,998,528 B (70.6 GiB)** | vs 83,617,662,528 B for the IQ3_S pair |
 
-At the 00:27 EDT snapshot: shard 2 complete and landed in `/srv/ai/models/IQ3_XXS/`,
-shard 1 at 37.27/47.04 GB → **66.07/75.84 GB = 87.1%**, 23–50 MB/s, ETA ~00:31.
-Confirm both shards are in `IQ3_XXS/` (and no `.incomplete` remains) before
-starting §3.3. Note `hf` stages in
+**Complete 2026-10-12 00:30 EDT** (28.5 min wall, ~44 MB/s): both shards are in
+`/srv/ai/models/IQ3_XXS/` at exactly their published sizes — 47,039,860,096 B and
+28,800,138,432 B — no `.incomplete` remains and the `hf` process has exited.
+Shard 2 landed first (00:18); shard 1 is the slow one. Note `hf` stages in
 `/srv/ai/models/.cache/huggingface/download/IQ3_XXS/*.incomplete` and only moves
-the file into `IQ3_XXS/` when the shard is whole — an empty `IQ3_XXS/` dir does
-**not** mean nothing has downloaded.
+a file into `IQ3_XXS/` when it is whole — an empty `IQ3_XXS/` dir does **not**
+mean nothing has downloaded.
 
 ### 3.2 The blocker: the SSD pool cannot hold both quants
 
@@ -193,7 +193,8 @@ Downtime window: shard copy HDD→SSD (~5–10 min on rpool) + pack build + mode
 load (IQ3_XXS runs in `--resident-experts` low-RAM mode; allow 15–25 min).
 
 ```bash
-# 0. confirm the download finished (both shards present, no .incomplete left)
+# 0. confirm the download finished — VERIFIED 2026-10-12 00:30 EDT (both shards
+#    present at published sizes, no .incomplete, hf exited). Re-run if unsure:
 ssh root@192.168.1.10 'ls -la /srv/ai/models/IQ3_XXS; \
   find /srv/ai/models/.cache/huggingface/download/IQ3_XXS -name "*.incomplete"'
 

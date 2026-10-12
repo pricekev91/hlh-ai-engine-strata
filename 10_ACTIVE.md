@@ -5,12 +5,14 @@ Active items in progress. These are the current focus areas.
 ## Active (V100 LXC 115 Strata sm_70) — Phase 3: IQ3_XXS cutover
 
 - [ ] **IQ3_XXS cutover** — run the §3.3 runbook in `3phase-tunning.md`
-  (scheduled window: 2026-10-12 morning). The IQ3_XXS shard pair downloads on
-  prox01 into `/srv/ai/models/IQ3_XXS/` (started 00:01 EDT, 75.84 GB, ~87% done
-  at 00:27, ETA ~00:31). Sequence: stop `strata.service` -> delete the IQ3_S
+  (scheduled window: 2026-10-12 morning). The IQ3_XXS shard pair is already on
+  prox01 in `/srv/ai/models/IQ3_XXS/` (complete 00:30 EDT, 75.84 GB, both shards
+  at their published sizes). Sequence: stop `strata.service` -> delete the IQ3_S
   pair from `/strata-models` -> rsync IQ3_XXS onto it -> `setup.sh --model
   IQ3_XXS --gguf-dir /srv/ssd-models` -> carry the Phase 1+2 flags into
   `strata-iq3_xxs.json` -> restart. **Expect 15–25 min of downtime.**
+- [x] IQ3_XXS shard pair downloaded to `/srv/ai/models/IQ3_XXS/` on prox01
+  (28.5 min, ~44 MB/s; 47,039,860,096 + 28,800,138,432 B verified).
 - [ ] Hard constraint (do not skip): `rpool` is the host's only SSD (128 GB
   NVMe, boot pool) with **9.45G avail** and `rpool/strata-models` already at
   77.9G. The IQ3_S and IQ3_XXS pairs **cannot coexist on the SSD** — the old
