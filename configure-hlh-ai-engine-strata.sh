@@ -71,7 +71,10 @@ MODEL_NAME="${MODEL_NAME:-IQ3_S}"        # --model: Q2_0 | IQ2_XS | IQ3_XXS | IQ
 # RaidZ1-6TB HDD reads of the 78 GB pair were too slow; SSD validated live 2026-10-09.
 GGUF_DIR="${GGUF_DIR:-/srv/ssd-models}"  # --gguf-dir: local GGUF shards, no model download
 STRATA_CONTEXT="131072"      # 128K - required (16K is unusable for this workload)
-STRATA_KV="int8"
+# Phase 1 tuning (3phase-tunning.md, 2026-10-11): k8v4 = INT8 K (exact attention
+# scores) + rotated Q4_0 V, 816 vs 1056 B/cell - frees ~23% of the 128K KV for
+# expert cache slots. setup.sh accepts int8|q4_0|k8v4.
+STRATA_KV="k8v4"
 STRATA_VISION="no"
 STRATA_PORT="80"
 STRATA_HOST="0.0.0.0"
@@ -312,6 +315,42 @@ CUDAEOF
 	fi
 	[ -n "$CFG_JSON" ] || fatal "no Strata config for ${MODEL_NAME} found in $STRATA_DIR (setup did not finish?)"
 	log "  Using config: $CFG_JSON"
+
+	# --- Phase 1 tuning flags (3phase-tunning.md) ---
+	# setup.sh writes the base args; these engine flags are NOT setup.sh options,
+	# so patch them into the config JSON's args array (idempotent):
+	#   --kv-grow                 KV takes VRAM only for cells requests actually
+	#                             reach (typ. ~30k, not the 131k cap) -> slots back
+	#                             to the expert cache (needs --expert-profile)
+	#   --prefill auto:16384      bigger prompt chunks amortize expert streaming
+	#                             over more rows (2-4x prefill expected)
+	#   --adapt-async 1           RAM<->VRAM expert swaps advance between verify
+	#                             windows instead of blocking one (not bit-exact)
+	#   --expert-profile-save     learn the VRAM tier from real routing; saved on
+	#                             QUIT and every 10 min between requests, then
+	#                             pre-filled at start via the existing --expert-profile
+	log "  Applying Phase 1 tuning flags to $CFG_JSON..."
+	"$STRATA_DIR/.venv/bin/python" - "$CFG_JSON" "$STRATA_DIR/data/expert-profile.bin" <<'PYEOF'
+import json, sys
+p, profile = sys.argv[1], sys.argv[2]
+cfg = json.load(open(p))
+a = cfg["args"]
+def set_pair(flag, val):
+    if flag in a:
+        a[a.index(flag) + 1] = val
+    else:
+        a += [flag, val]
+if "--prefill" in a and a[a.index("--prefill") + 1] == "auto":
+    a[a.index("--prefill") + 1] = "auto:16384"
+if "--kv-grow" not in a:
+    a.append("--kv-grow")
+set_pair("--adapt-async", "1")
+set_pair("--expert-profile-save", profile)
+set_pair("--expert-profile-save-every", "10")
+json.dump(cfg, open(p, "w"), indent=1)
+PYEOF
+	log "  Phase 1 flags: $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['args']))" "$CFG_JSON" 2>/dev/null || echo 'see config')"
+
 	cat > /etc/systemd/system/strata.service <<UNITEOF
 [Unit]
 Description=Strata AI Engine (Qwen3.8-Flash-Next ${MODEL_NAME}, ${STRATA_CONTEXT} ctx) - CUDA ${CUDA_MAJOR} sm_70 EXPERIMENTAL build on Tesla V100 32GB, port ${STRATA_PORT}
