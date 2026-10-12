@@ -82,7 +82,7 @@ What that does, in order:
      (exact-match FATAL gate — NVML requires userspace == host kernel driver),
    - Strata 0.1.32 at pinned `c499bd1` → `/opt/strata`,
    - `STRATA_EXPERIMENTAL_SM60=1 ./setup.sh --setup --family qwen --model IQ3_S
-     --context 131072 --kv int8 --vision no --gpu 0 --port 80 --host 0.0.0.0
+     --context 131072 --kv k8v4 --vision no --gpu 0 --port 80 --host 0.0.0.0
      --data-dir /srv/ai/models/strata --gguf-dir /srv/ssd-models --low-ram auto
      --no-start --yes`
      (venv + pinned deps, llama.cpp fetch, **engine compile ~10–40 min**,

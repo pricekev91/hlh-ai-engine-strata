@@ -339,7 +339,7 @@ def set_pair(flag, val):
     if flag in a:
         a[a.index(flag) + 1] = val
     else:
-        a += [flag, val]
+        a.extend([flag, val])
 if "--prefill" in a and a[a.index("--prefill") + 1] == "auto":
     a[a.index("--prefill") + 1] = "auto:16384"
 if "--kv-grow" not in a:

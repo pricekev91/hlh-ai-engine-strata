@@ -32,6 +32,8 @@ tokens): int8 KV reserves VRAM for all 131,072 cells, starving the expert cache.
 
 ## Phase 1 — VRAM reclaim + prefill (biggest wins, config only)
 
+**STATUS: APPLIED 2026-10-11 (live ad-hoc + IaC, tagged v0.2.0).** Results below.
+
 Edit args in `/opt/strata/strata-iq3_s.json` (and mirror into
 `configure-hlh-ai-engine-strata.sh` SETUP_ARGS so redeploys keep them):
 
@@ -53,6 +55,29 @@ Verify after each restart: `expert cache <N> slots` line in the log grows,
 
 Benchmark: replay 2–3 real OpenCode sessions; record `prompt ... read in ...
 tok/s` and `generated ... tok/s` lines + `drafts accepted` ratio.
+
+### Phase 1 applied — verification (2026-10-11, live LXC 115)
+
+| Flag | Honored? | Evidence |
+|---|---|---|
+| `--kv k8v4` | ✅ | expert cache auto: 24.82 GiB free (was 24.47) -> **12,598 slots** (was 12,418) |
+| `--kv-grow` | ❌ auto-off | engine: "--kv-grow is off (one GPU, a profile, the whole K/V in VRAM, every expert in RAM...)" — engine keeps full KV in VRAM in this config; flag is harmless, engine decides |
+| `--prefill auto:16384` | ✅ | "prompt chunk auto: 16384 tokens"; prompt path borrows 3,370 slots / 6.41 GiB (was 1,795 / 3.40) |
+| `--adapt-async 1` | ✅ | "adaptive tier asynchronous: up to 96 swaps per round, a round every 4 windows" |
+| `--expert-profile-save` | ✅ | "expert profile saved to /opt/strata/data/expert-profile.bin (periodic)" |
+
+Measured after restart:
+
+- **Prefill: 367–779 tok/s** (was 48–106) — **3.5–7x faster**; an 80,505-token
+  prompt read in 103 s, a 3,425-token prompt in 9.3 s.
+- **Decode: 43.5 tok/s warm** (baseline typical 34); 27.2 on the first
+  cold request.
+- Expert cache hit rate 90.3–90.6% (was 94–95.5%) — slightly lower while the
+  learned profile re-adapts; watch over the next days.
+- RAM: pinned complement grew 26.68 -> 29.33 GiB (bigger lendable set);
+  **0 major faults**, CT 51.6/57 GB, ~17 GB page cache. VRAM still full
+  (432 MiB free) — kv-grow would have helped but the engine declined it.
+- Rollback: `/opt/strata/strata-iq3_s.json.bak-0.1.0` + `systemctl restart strata`.
 
 ## Phase 2 — CPU pool + speculation tuning
 

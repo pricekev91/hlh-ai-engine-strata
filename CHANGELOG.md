@@ -5,6 +5,26 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-11
+
+### Changed (Phase 1 tuning — 3phase-tunning.md)
+
+- **Runtime flags** (live ad-hoc on LXC 115 + IaC in `configure`):
+  `--kv k8v4` (INT8 K + Q4_0 V, 816 vs 1056 B/cell), `--prefill auto:16384`,
+  `--adapt-async 1`, `--expert-profile-save <profile> --expert-profile-save-every 10`,
+  `--kv-grow` (engine auto-disabled it in this config — harmless).
+- `configure`: new post-setup step patches the engine-only flags into the
+  config JSON's args array (setup.sh only knows `--kv`); idempotent.
+  Also fixed an `a += [...]` UnboundLocalError in the patch helper.
+
+### Measured (live, 2026-10-11)
+
+- Prefill **367–779 tok/s** (baseline 48–106) — 3.5–7x faster.
+- Decode **43.5 tok/s warm** (baseline typical 34).
+- Expert cache 12,598 slots (was 12,418); 0 major faults; hit rate
+  90.3–90.6% while the learned profile re-adapts (was 94–95.5%) — watch.
+- Rollback: `/opt/strata/strata-iq3_s.json.bak-0.1.0` + service restart.
+
 ## [0.1.0] - 2026-10-11
 
 ### Notes
