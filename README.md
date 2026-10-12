@@ -142,7 +142,10 @@ hlh-ai-engine-strata/
 
 ## Governance
 
-- Versioning: `major.minor.patch-strata` (e.g. `1.0.0-strata`)
+- Versioning: `major.minor.patch` — **v0.1.0** is the working baseline
+  (2026-10-11, decode 34 tok/s measured live; tuning plan in
+  [3phase-tunning.md](3phase-tunning.md)). The `1.0.x-strata` labels in
+  git history predate the reset.
 - Change management: PRs + review for code changes; docs can be direct.
 - Pinned externals:
   - Strata `c499bd102e7a4135c0de389dcfe38c399759ccc8` (0.1.32) — bump

@@ -5,6 +5,26 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - 2026-10-11
+
+### Notes
+
+- **Versioning reset: 0.1.0 is the working baseline.** The currently pushed
+  state (deploy/configure scripts unchanged since the `1.0.4-strata` commit)
+  is tagged **v0.1.0** — the starting point for the 3-phase tuning plan
+  ([3phase-tunning.md](3phase-tunning.md)). The `1.0.x-strata` labels in
+  commit messages and the entries below are historical.
+- **Measured baseline (live LXC 115, 2026-10-11):** decode **34 tok/s**
+  (typical range 26–43, thinking tokens), prefill 48–106 tok/s on fresh
+  prompt reads, expert cache hit rate 94–95.5%, engine 0.1.41 on
+  Qwen3.8-Flash-Next IQ3_S.
+
+### Added
+
+- `3phase-tunning.md` — 3-phase tuning plan from the 2026-10-11 engine audit
+  (Phase 1 VRAM reclaim + prefill flags, Phase 2 CPU pool + speculation,
+  Phase 3 model + hardware), with baseline table and rollback notes.
+
 ## [1.0.4-strata] - 2026-10-10
 
 ### Changed
