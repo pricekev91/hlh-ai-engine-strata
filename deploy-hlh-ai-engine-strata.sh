@@ -7,9 +7,9 @@ BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-hlh-ai-engine-strata.sh"
 usage() {
 	cat <<'EOF'
 Usage:
-	./deploy-hlh-ai-engine-strata.sh [--skip-host-driver] [--keep-111] [--no-bootstrap] [--yes]
+	./deploy-hlh-ai-engine-strata.sh [--skip-host-driver] [--keep-111] [--no-bootstrap] [--yes] [--model M]
 
-Strata path (Qwen3.8-Flash-Next IQ2_XS on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
+Strata path (Qwen3.8-Flash-Next IQ3_S/IQ3_XXS on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	1) Verify host NVIDIA 580.65.06 (R580, last for Volta GV100 cc 7.0) + V100 present
 	2) Ensure Ubuntu 24.04 LXC template
 	3) Remove stale LXC 115 leftovers (115.conf.bak.*) / confirm delete if 115 exists
@@ -85,19 +85,25 @@ SSD_DATASET="${SSD_POOL}/strata-models"
 MODEL_SSD_HOST_DIR="/strata-models"
 MODEL_SSD_LXC_DIR="/srv/ssd-models"
 LXC_ROOTFS_SIZE="64"
-# RAM sizing (IQ3_S, --resident-experts low-RAM mode; validated live 2026-10-10):
+# Model quant to seed onto the SSD (Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S).
+# Phase 3 (3phase-tunning.md §3.4): was hardcoded to IQ3_S, which would not
+# seed IQ3_XXS on a rebuild. Override with --model or MODEL_QUANT=...
+MODEL_QUANT="${MODEL_QUANT:-IQ3_S}"
+# RAM sizing (IQ3_S/IQ3_XXS, --resident-experts low-RAM mode; validated live 2026-10-10):
 # Strata pins ~26.7 GiB of experts page-locked in RAM (the complement of the GPU
 # cache) + ~2.7 GiB runtime. The rest of the allocation is page cache for the
 # mmap'd 78 GB expert GGUFs - at 48 GB the CT ran at its cgroup limit and the OS
-# re-read experts from SSD constantly (13M+ major faults). 55 GB gives the mmap
+# re-read experts from SSD constantly (13M+ major faults). 57 GB gives the mmap
 # cache ~7 GB more headroom. Host is 61 GiB: leaves ~6 GiB for host/PVE,
 # CT 109 (hlh-docker) and the small VM - do not start 111/112/113 alongside.
-LXC_MEMORY="56320"
+# Live CT 115 is 58320 (2026-10-12); keep IaC in sync or a rebuild silently
+# loses 2 GB of page-cache headroom.
+LXC_MEMORY="58320"
 LXC_CORES="12"
 LXC_SWAP="512"
 LXC_IP_CONFIG="192.168.1.15/24"
 LXC_GATEWAY="192.168.1.1"
-LXC_DESC="Strata AI engine (Qwen3.8-Flash-Next IQ3_S, 128K ctx) - CUDA $CUDA_MAJOR sm_70 EXPERIMENTAL build (-DSTRATA_EXPERIMENTAL_SM60=ON) + driver $NVIDIA_DRIVER_VERSION_SHORT for Tesla V100 (GV100 32GB cc 7.0) via OCuLink c5:00.0, model shards on $SSD_DATASET (SSD) -> /srv/ssd-models, packs on $POOL:/srv/ai/models/strata, port 80"
+LXC_DESC="Strata AI engine (Qwen3.8-Flash-Next ${MODEL_QUANT}, 128K ctx) - CUDA $CUDA_MAJOR sm_70 EXPERIMENTAL build (-DSTRATA_EXPERIMENTAL_SM60=ON) + driver $NVIDIA_DRIVER_VERSION_SHORT for Tesla V100 (GV100 32GB cc 7.0) via OCuLink c5:00.0, model shards on $SSD_DATASET (SSD) -> /srv/ssd-models, packs on $POOL:/srv/ai/models/strata, port 80"
 
 # LXC 111 = hlh-ai-engine-egpu (llama.cpp, same V100). Stopped at cutover.
 EGPU_LXC_ID=111
@@ -113,10 +119,15 @@ while [[ $# -gt 0 ]]; do
 		--keep-111) KEEP_EGPU_LXC=true; shift ;;
 		--no-bootstrap) NO_BOOTSTRAP=true; shift ;;
 		--yes) ASSUME_YES=true; shift ;;
+		--model) MODEL_QUANT="$2"; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "ERROR: Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
 done
+case "$MODEL_QUANT" in
+	Q2_0|IQ2_XS|IQ3_XXS|IQ3_S) ;;
+	*) echo "ERROR: --model must be Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S (got: $MODEL_QUANT)" >&2; exit 1 ;;
+esac
 
 confirm() { # $1 = prompt text
 	[[ "$ASSUME_YES" == "true" ]] && return 0
@@ -267,20 +278,49 @@ if ! zfs list "$SSD_DATASET" >/dev/null 2>&1; then
 		|| { echo "ERROR: zfs create $SSD_DATASET failed (does SSD pool ${SSD_POOL} exist? override with SSD_POOL=<pool>)" >&2; exit 1; }
 fi
 mkdir -p "${MODEL_SSD_HOST_DIR}"
-# Seed the IQ3_S shard pair onto the SSD (idempotent): skip when already there,
+# Seed the ${MODEL_QUANT} shard pair onto the SSD (idempotent): skip when already there,
 # copy from the HDD model dir when present; otherwise the bootstrap pre-flight
 # fatals with a clear missing-shard message.
-GGUF_STEM="Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"
+GGUF_STEM="Qwen3.8-Flash-Next-GSQ-RCO-${MODEL_QUANT}"
+# Capacity gate (3phase-tunning.md §3.4): rpool is a 128 GB boot pool with
+# ~9.5G avail when the old quant sits on it. Refuse to seed when there is not
+# room for the full pair + 8G headroom instead of filling the pool mid-copy.
+NEED_BYTES=0
+for _i in 00001 00002; do
+	_f="${GGUF_STEM}-${_i}-of-00002.gguf"
+	if [ ! -s "${MODEL_SSD_HOST_DIR}/${_f}" ] && [ -s "${MODEL_HOST_DIR}/${_f}" ]; then
+		_sz=$(stat -c%s "${MODEL_HOST_DIR}/${_f}" 2>/dev/null || echo 0)
+		NEED_BYTES=$((NEED_BYTES + _sz))
+	elif [ ! -s "${MODEL_SSD_HOST_DIR}/${_f}" ] && [ -s "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" ]; then
+		_sz=$(stat -c%s "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" 2>/dev/null || echo 0)
+		NEED_BYTES=$((NEED_BYTES + _sz))
+	fi
+done
+if [ "$NEED_BYTES" -gt 0 ]; then
+	AVAIL_BYTES=$(zfs get -Hp -o value available "$SSD_DATASET" 2>/dev/null || echo 0)
+	MIN_BYTES=$((NEED_BYTES + 8 * 1024 * 1024 * 1024))
+	if [ "$AVAIL_BYTES" -lt "$MIN_BYTES" ]; then
+		echo "ERROR: not enough space on ${SSD_DATASET} to seed ${MODEL_QUANT} (need $(numfmt --to=iec "$NEED_BYTES") + 8G headroom, avail $(numfmt --to=iec "$AVAIL_BYTES")). Delete the old quant from ${MODEL_SSD_HOST_DIR} first." >&2
+		exit 1
+	fi
+fi
 for _i in 00001 00002; do
 	_f="${GGUF_STEM}-${_i}-of-00002.gguf"
 	if [ -s "${MODEL_SSD_HOST_DIR}/${_f}" ]; then
 		echo "  SSD shard present: ${_f}"
 	elif [ -s "${MODEL_HOST_DIR}/${_f}" ]; then
-		echo "  Seeding ${_f} from ${MODEL_HOST_DIR} (78 GB total, HDD -> SSD, a few minutes)..."
+		echo "  Seeding ${_f} from ${MODEL_HOST_DIR} (HDD -> SSD, a few minutes)..."
 		if command -v rsync >/dev/null 2>&1; then
 			rsync -a --info=progress2 "${MODEL_HOST_DIR}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
 		else
 			cp "${MODEL_HOST_DIR}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
+		fi
+	elif [ -s "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" ]; then
+		echo "  Seeding ${_f} from ${MODEL_HOST_DIR}/${MODEL_QUANT} (HDD -> SSD, a few minutes)..."
+		if command -v rsync >/dev/null 2>&1; then
+			rsync -a --info=progress2 "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
+		else
+			cp "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
 		fi
 	else
 		echo "WARNING: ${_f} found on neither ${MODEL_SSD_HOST_DIR} nor ${MODEL_HOST_DIR} - bootstrap will fatal unless shards are provided" >&2
@@ -337,7 +377,7 @@ if [[ "$NO_BOOTSTRAP" == "true" ]]; then
 	echo "[6/7] Skipping bootstrap (--no-bootstrap). Run later:"
 	echo "  ./configure-hlh-ai-engine-strata.sh"
 else
-	echo "[6/7] Running in-container Strata bootstrap (CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, IQ3_S from local SSD shards)..."
+	echo "[6/7] Running in-container Strata bootstrap (CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, $MODEL_QUANT from local SSD shards)..."
 	echo "      This is the long step: engine compile ~10-40 min + pack from SSD shards (no model download)."
 	pct exec "${LXC_ID}" -- mkdir -p /root/strata-bootstrap
 	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --perms 0755

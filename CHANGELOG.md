@@ -5,6 +5,29 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-12
+
+### Changed (Phase 3 item 10 — IQ3_XXS cutover, 3phase-tunning.md §3.3)
+
+- **Model IQ3_S -> IQ3_XXS** (live cutover ~00:53 EDT, ~25 min downtime):
+  SSD pair swapped (70.6 GiB XXS for 77.9 GiB S), re-packed from local SSD
+  shards (engine build reused), Phase 1+2 flags carried into
+  `strata-iq3_xxs.json`, `strata.service` repointed (old unit kept as
+  `strata.service.bak-iq3_s`). Rollback intact: `packs/iq3_s` + HDD IQ3_S
+  shards untouched.
+- **Deploy script gaps fixed (§3.4):** `GGUF_STEM` parameterized via
+  `--model`/`MODEL_QUANT`, `avail >= pair + 8G` capacity gate before seeding,
+  `LXC_MEMORY` 56320 -> 58320 (live CT 115).
+
+### Measured (live, 2026-10-12, first boot)
+
+- Expert cache **15,658 slots** (was 12,598); `--kv-grow` honored (elastic KV
+  16,384/131,072 cells in VRAM); prefill ring 384 slots; `--adapt-async`
+  auto-off (needs `--resident-experts`; setup chose normal mode on 57 GB).
+- Cold 58-token probe: prefill 31.1 tok/s, decode 29.6 tok/s, hit rate 86.9%.
+- Rollback: copy IQ3_S pair back to `/strata-models`, restore
+  `strata.service.bak-iq3_s`, `systemctl restart strata`.
+
 ## [0.3.0] - 2026-10-11
 
 ### Changed (Phase 2 tuning — 3phase-tunning.md)
