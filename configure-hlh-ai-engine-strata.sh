@@ -75,6 +75,18 @@ MODEL_FAMILY="qwen"
 # (--model/--gguf-dir override both; the merged 78G single file is for llama.cpp,
 # Strata's --gguf-dir takes the split pair, not the merged file.)
 MODEL_NAME="${MODEL_NAME:-IQ3_S}"        # --model: Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S
+MODEL_TAG="$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')"
+# Learned expert profile: on the model dataset (mp0), NOT under /opt/strata.
+# /opt/strata is the container rootfs, so `pct destroy` deletes whatever the engine
+# learned from real traffic (94.8% decode hit rate vs ~87% cold, days to re-learn);
+# the model dataset survives. One subdirectory per quant, because the profile is
+# quant-specific routing and IQ3_S / IQ3_XXS must not overwrite each other (both
+# configs pointed at the same file until 2026-10-12).
+# Placement costs nothing: the file is ~192 KB and is read exactly once at startup
+# (0.1.43 generate.cpp:3309/3492) into RAM, never per token. Only the 78 GB GGUF
+# shard pair needs the SSD - see 3phase-tunning.md.
+PROFILE_DIR="$STRATA_MODEL_DIR/data/$MODEL_TAG"
+PROFILE_PATH="$PROFILE_DIR/expert-profile.bin"
 # Shards default to the SSD bind (mp1, host rpool/strata-models -> /strata-models).
 # RaidZ1-6TB HDD reads of the 78 GB pair were too slow; SSD validated live 2026-10-09.
 GGUF_DIR="${GGUF_DIR:-/srv/ssd-models}"  # --gguf-dir: local GGUF shards, no model download
@@ -353,7 +365,7 @@ CUDAEOF
 	#                             8192: CT is 57 GB with ~29.3 pinned + runtime;
 	#                             8 GB would squeeze the expert page cache.
 	log "  Applying Phase 1+2 tuning flags to $CFG_JSON..."
-	"$STRATA_DIR/.venv/bin/python" - "$CFG_JSON" "$STRATA_DIR/data/expert-profile.bin" <<'PYEOF'
+	"$STRATA_DIR/.venv/bin/python" - "$CFG_JSON" "$PROFILE_PATH" <<'PYEOF'
 import json, sys
 p, profile = sys.argv[1], sys.argv[2]
 cfg = json.load(open(p))
@@ -367,6 +379,10 @@ if "--prefill" in a and a[a.index("--prefill") + 1] == "auto":
     a[a.index("--prefill") + 1] = "auto:16384"
 if "--kv-grow" not in a:
     a.append("--kv-grow")
+# setup.sh writes --expert-profile as <install dir>/data/expert-profile.bin, i.e. on
+# the container rootfs. Repoint BOTH the read and the save side at the dataset path
+# so the learned profile outlives a rebuild and each quant keeps its own.
+set_pair("--expert-profile", profile)
 set_pair("--adapt-async", "1")
 set_pair("--expert-profile-save", profile)
 set_pair("--expert-profile-save-every", "10")
@@ -375,26 +391,41 @@ set_pair("--lookup-chain", "2")
 if "--prompt-cache-tail" not in a:
     a.append("--prompt-cache-tail")
 set_pair("--conversation-cache-mib", "4096")
+# fit_max_tokens: the engine rejects a request outright when
+# prompt + max_tokens > context ("prompt (114845 tokens) + max tokens (16244)
+# exceeds the context (131072); requests are never truncated", 0.1.43). Clients
+# like OpenCode reserve the full limit.output (16384) for the reply, so a long
+# session dies at ~115k instead of using the window. Clamping max_tokens to the
+# room left turns that 400 into a short completion.
+cfg["fit_max_tokens"] = True
 json.dump(cfg, open(p, "w"), indent=1)
 PYEOF
 	log "  Phase 1+2 flags: $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['args']))" "$CFG_JSON" 2>/dev/null || echo 'see config')"
 
-	# --- Carry the learned expert profile across a rebuild ---
-	# /opt/strata is on the container rootfs, so a nuke loses the profile the engine
-	# learned from real traffic (94.8% decode hit rate vs ~87% cold; days to climb
-	# back). The deploy script snapshots data/ onto the model dataset, which survives.
-	# Safe across versions: the file is STRP magic + version 1, and 0.1.43's
-	# read_expert_profile (src/core/expert_cache.cpp) still reads version 1.
+	# --- Learned expert profile: the dataset path is the source of truth ---
+	# PROFILE_PATH lives on the model dataset, so it survives pct destroy on its own.
+	# Seed it from the newest pre-rebuild snapshot (or leave it alone if the engine
+	# has already been writing to it - that copy is newer than any snapshot). The
+	# rest of data/ (draft vocabularies, gguf_fingerprints.json) still belongs on the
+	# rootfs where the engine looks for it. Format-safe across versions: STRP magic +
+	# version 1, and 0.1.43's read_expert_profile (src/core/expert_cache.cpp) reads 1.
+	mkdir -p "$PROFILE_DIR" "$STRATA_DIR/data"
 	LATEST_SNAP=""
 	for d in "$STRATA_MODEL_DIR"/pre-rebuild-*/data; do
 		[ -s "$d/expert-profile.bin" ] && LATEST_SNAP="$d"
 	done
+	SNAP_NAME="${LATEST_SNAP%/data}"; SNAP_NAME="${SNAP_NAME##*/}"
+	if [ -n "$LATEST_SNAP" ] && { [ ! -s "$PROFILE_PATH" ] || [ "$LATEST_SNAP/expert-profile.bin" -nt "$PROFILE_PATH" ]; }; then
+		cp -a "$LATEST_SNAP/expert-profile.bin" "$PROFILE_PATH" \
+			&& log "  Seeded learned expert profile -> ${PROFILE_PATH} (from ${SNAP_NAME})"
+	fi
 	if [ -n "$LATEST_SNAP" ]; then
-		mkdir -p "$STRATA_DIR/data"
 		cp -a "$LATEST_SNAP"/. "$STRATA_DIR/data/" 2>/dev/null || true
-		log "  Restored learned expert profile from ${LATEST_SNAP##*/} ($(du -h "$STRATA_DIR/data/expert-profile.bin" 2>/dev/null | awk '{print $1}'))"
+	fi
+	if [ -s "$PROFILE_PATH" ]; then
+		log "  Expert profile: ${PROFILE_PATH} ($(du -h "$PROFILE_PATH" | awk '{print $1}')) - dataset-backed, survives a rebuild"
 	else
-		log "  No expert-profile snapshot found - the profile will be re-learned from cold."
+		log "  No expert profile found - the engine will learn one from cold."
 	fi
 
 	cat > /etc/systemd/system/strata.service <<UNITEOF

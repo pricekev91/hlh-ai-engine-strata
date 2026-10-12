@@ -5,6 +5,40 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-10-12
+
+### Changed (learned expert profile lives on the model dataset)
+
+- **`--expert-profile` / `--expert-profile-save` are repointed from
+  `/opt/strata/data/expert-profile.bin` (container rootfs) to
+  `/srv/ai/models/strata/data/<quant>/expert-profile.bin` (mp0 dataset).**
+  setup.sh puts it on the rootfs, so `pct destroy` deletes it; the dataset
+  mount survives, so the profile now needs no snapshot at all. One directory
+  per quant (`iq3_s`, `iq3_xxs`) because the profile is quant-specific
+  routing — until now both configs pointed at the same file and a cutover
+  would have cross-contaminated them.
+  Placement costs nothing: the file is ~192 KB and 0.1.43 reads it exactly
+  once at startup (`src/program/generate.cpp:3309`/`:3492`) into RAM, never
+  per token, so it is not on the decode I/O path. Only the 78 GB shard pair
+  needs the SSD.
+- **Seeding is newest-wins, not snapshot-wins.** The bootstrap still reads
+  `pre-rebuild-*/data/expert-profile.bin`, but only copies it into the
+  dataset path when that path is empty or the snapshot is newer. A profile
+  the engine already learned on the dataset can no longer be shadowed by an
+  older pre-rebuild snapshot. The rest of `/opt/strata/data` (draft
+  vocabularies, `gguf_fingerprints.json`) is still restored to the rootfs
+  where the engine looks for it.
+
+### Added
+
+- **`fit_max_tokens: true` in the model config JSON.** The engine rejects a
+  request outright when `prompt + max_tokens > context` — observed live:
+  `prompt (114845 tokens) + max tokens (16244) exceeds the context (131072);
+  requests are never truncated`. OpenCode reserves the full `limit.output`
+  (16384) for the reply, so a long session 400s at ~115k tokens instead of
+  using the window. This clamps `max_tokens` to the room left, turning that
+  hard failure into a short completion.
+
 ## [0.4.2] - 2026-10-12
 
 ### Changed (engine pin 0.1.41 -> 0.1.43, ahead of the LXC 115 rebuild)
