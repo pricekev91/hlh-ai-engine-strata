@@ -5,6 +5,52 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-10-12
+
+### Changed (engine pin 0.1.41 -> 0.1.43, ahead of the LXC 115 rebuild)
+
+- **`STRATA_COMMIT` pinned to `7695859aa13a` (v0.1.43, tagged 2026-10-11).**
+  Chosen for decode on this board: 0.1.42 is +13–16% decode on one NVIDIA GPU
+  (up to +30% where the CPU outruns PCIe — the V100-over-OCuLink case), and
+  0.1.43 adds +5–11% on Tesla P100 / RTX 30-series under Linux. Verified the
+  Volta path survives: `STRATA_EXPERIMENTAL_SM60` is still in 0.1.43
+  (`setup.py::experimental_sm60`, and the `STRATA_EXPERIMENTAL_SM60` CMake
+  option guarding `cc < 7.5`), so the CUDA 12.8 sm_70 build is unchanged.
+- **Answer-shape caveat:** 0.1.42 enabled two NVIDIA defaults that change
+  answers slightly — `STRATA_ROUTE_TAIL_SKIP=7` and the measured PCIe share.
+  Accepted deliberately (speed). To get 0.1.41-identical answers, add
+  `Environment=STRATA_ROUTE_TAIL_SKIP=0` and
+  `Environment=STRATA_PCIE_FRAC_DEFAULT=old` to `strata.service`.
+- **`STRATA_VERSION` variable added** so the pin, the `[3/6]` log line and the
+  comment block cannot drift apart.
+
+### Added (surviving a `pct destroy`)
+
+- **Expert-profile snapshot/restore.** `/opt/strata` is on the container
+  rootfs, so `pct destroy` deletes the profile learned from real traffic
+  (94.8% decode hit rate vs ~87% cold, days to climb back). The deploy script
+  now tars `/opt/strata/data` onto the model dataset
+  (`/srv/ai/models/strata/pre-rebuild-<ts>/`) before destroying, and the
+  bootstrap restores the newest snapshot before starting the service.
+  Format-safe across versions: the file is `STRP` magic + version 1, and
+  0.1.43's `read_expert_profile` (`src/core/expert_cache.cpp`) still reads
+  version 1.
+- A pre-rebuild snapshot of the running 0.1.41 box was taken by hand at
+  `/srv/ai/models/strata/pre-rebuild-20261012/` (configs, unit, logs,
+  `data/expert-profile.bin` md5 `e020bae26522a5675ac981e2d7033f0d`).
+
+### Verified (not changed)
+
+- **Phase 1+2 tuning is already in the IaC** and reproduces the live config
+  exactly — `configure-hlh-ai-engine-strata.sh` patches `--prefill auto:16384`,
+  `--kv-grow`, `--adapt-async 1`, `--expert-profile-save`,
+  `--expert-profile-save-every 10`, `--pool-workers 10`, `--lookup-chain 2`,
+  `--prompt-cache-tail`, `--conversation-cache-mib 4096` into the setup-written
+  config, and writes the tuned unit (`LimitMEMLOCK=infinity`,
+  `STRATA_EXPERIMENTAL_SM60=1`, restart budget). A rebuild does not lose them.
+- `.done` markers restored on the SSD IQ3_S pair and added for the HDD
+  IQ3_XXS pair (they were dropped by the Phase 3 rollback path).
+
 ## [0.4.1] - 2026-10-12
 
 ### Changed (Phase 3 item 10 verdict — revert to IQ3_S)

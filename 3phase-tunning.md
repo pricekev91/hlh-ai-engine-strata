@@ -3,7 +3,8 @@
 Audited 2026-10-11 against the live engine (0.1.41) and `/opt/strata/strata-iq3_s.log`.
 Phase 3 refreshed 2026-10-12 against the live host (prox01) while the IQ3_XXS
 shard pair downloads — see §3.1–3.4 for the live state, the SSD capacity
-blocker, and the cutover runbook.
+blocker, and the cutover runbook. The engine pin has since moved to **0.1.43**
+(§3.7); the live box is still 0.1.41 until the LXC 115 rebuild.
 Goal: faster decode and shorter prefill stalls. Phase 1–2 are applied (see their
 STATUS lines); each change is one flag in `strata-iq3_s.json` args (or
 `configure-hlh-ai-engine-strata.sh` for permanence). Restart `strata.service`
@@ -271,7 +272,44 @@ Same replay as Phase 1/2 (2–3 real OpenCode sessions), record in `90_DONE.md`:
 12. Power cap: SXM4 V100 is a 300 W part, adapter caps at 250 W. Test
     `nvidia-smi -pl 300` (host, as root) — if accepted, app clock rises from
     1260 toward 1380 MHz. Revert with `nvidia-smi -pl 250` if unstable.
-13. Docs hygiene: README says 0.1.32 / Gen3 x2; reality is 0.1.41 / x4.
+13. ~~Docs hygiene: README says 0.1.32 / Gen3 x2; reality is 0.1.41 / x4.~~
+    DONE 2026-10-12 — README now pins 0.1.43 / Gen3 x4 (3.3 GB/s measured in the
+    engine log confirms x4; x2 would be ~1.6 GB/s).
+
+### 3.7 Engine upgrade 0.1.41 -> 0.1.43 (2026-10-12, ahead of the LXC 115 rebuild)
+
+Phase 1–3 tuned the *flags*. The remaining decode headroom is in the engine
+itself, and 0.1.42/0.1.43 target exactly this board's bottleneck:
+
+| Version | What it changes for the V100 |
+|---|---|
+| 0.1.42 | **+13–16% decode on one NVIDIA GPU**, up to +30% where the CPU outruns PCIe — the V100-over-OCuLink case (3.3 GB/s measured, `pcie_frac 0.09`) |
+| 0.1.43 | **+5–11% decode on Tesla P100 / RTX 30-series under Linux** (closest published analog to Volta) |
+
+Decisions and checks:
+
+- **Volta path verified, not assumed.** `STRATA_EXPERIMENTAL_SM60` is still in
+  0.1.43 (`setup.py::experimental_sm60`, and the CMake option guarding
+  `cc < 7.5`), so the CUDA 12.8 sm_70 source build is unchanged.
+- **Answer shape changes.** 0.1.42 enabled `STRATA_ROUTE_TAIL_SKIP=7` (skip an
+  expert ranked 7th or lower in every window of a miss) and the measured PCIe
+  share. Both change answers slightly. Accepted — this is a speed upgrade —
+  but it is the one thing that can undo the "intelligence over speed" call from
+  §3.5. To keep 0.1.41 answers: `STRATA_ROUTE_TAIL_SKIP=0` +
+  `STRATA_PCIE_FRAC_DEFAULT=old` in the unit.
+- **The rebuild would have silently lost the learned expert profile** —
+  `/opt/strata` is on the container rootfs, so `pct destroy` deletes it, and
+  cold start is ~87% hit rate vs 94.8% learned (days to climb back). Fixed in
+  the IaC: the deploy script snapshots `/opt/strata/data` to the model dataset
+  before destroying, the bootstrap restores the newest snapshot. Safe because
+  the profile is `STRP` magic + version 1 and 0.1.43's `read_expert_profile`
+  still reads version 1.
+- **Phase 1+2 needed no change** — they were already in
+  `configure-hlh-ai-engine-strata.sh` and reproduce the live config exactly.
+
+Measure after the rebuild, same 2–3 OpenCode session replay as §3.5: decode
+tok/s (beat 41.8–47.5), prefill tok/s, hit rate, and a quality gut-check on
+the coding prompts to confirm the tail-skip default did not cost accuracy.
 
 ## Expected combined effect
 

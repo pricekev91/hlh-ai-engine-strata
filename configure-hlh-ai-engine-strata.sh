@@ -47,16 +47,24 @@ EOF
 # --- PINNED VERSIONS (V100 Volta cc 7.0) ---
 # R580 580.65.06 = last driver supporting Volta (host kernel driver, installed via .run --dkms).
 # CUDA 12.8 = final toolkit with sm_70 (CUDA 13 dropped sm_60/sm_70; Strata needs CUDA 12.x).
-# Strata: v0.1.41 - the sm_70 experimental path is unchanged (STRATA_EXPERIMENTAL_SM60=1,
-# CUDA 12.x source build; 0.1.40.4: Volta code byte-identical to 0.1.40.3), and it carries
-# fixes this board relies on: RAM-resident prompts #1353, under-RAM Linux decode #1194,
-# the hung-engine watchdog #1317/#1407, the quoted-tool-call security fix (0.1.40.1).
+# Strata: v0.1.43 - the sm_70 experimental path is unchanged (STRATA_EXPERIMENTAL_SM60=1,
+# CUDA 12.x source build; still present in 0.1.43 setup.py#experimental_sm60 and the
+# CMakeLists STRATA_EXPERIMENTAL_SM60 option). Chosen over 0.1.41 for decode: 0.1.42 is
+# +13-16% decode on one NVIDIA GPU (up to +30% where the CPU outruns PCIe - this board's
+# V100-over-OCuLink case), 0.1.43 adds +5-11% on Tesla P100 / RTX 30-series under Linux.
+# CAVEAT: 0.1.42 turned on two NVIDIA defaults that change answers slightly -
+# STRATA_ROUTE_TAIL_SKIP=7 (skip experts ranked 7th+ in every window of a miss) and the
+# measured PCIe share. Set STRATA_ROUTE_TAIL_SKIP=0 and STRATA_PCIE_FRAC_DEFAULT=old in
+# the unit's Environment= lines to get 0.1.41-identical answers at the cost of the speed.
+# Also carries: RAM-resident prompts #1353, under-RAM Linux decode #1194, the hung-engine
+# watchdog #1317/#1407, the quoted-tool-call security fix (0.1.40.1).
 CUDA_VERSION="${CUDA_VERSION:-12.8.0-1}"
 CUDA_MAJOR="${CUDA_MAJOR:-12.8}"
 NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.65.06}"
 DRIVER_BRANCH="${DRIVER_BRANCH:-580}"
 STRATA_REPO="https://github.com/Niko1221/Strata.git"
-STRATA_COMMIT="${STRATA_COMMIT:-fb58e0dbc8399662c0e47c76578c6e878b14f6cf}"   # 0.1.41
+STRATA_VERSION="${STRATA_VERSION:-0.1.43}"
+STRATA_COMMIT="${STRATA_COMMIT:-7695859aa13afb248bdb4d36f9b2e95707db079d}"   # 0.1.43
 STRATA_DIR="/opt/strata"
 STRATA_MODEL_DIR="/srv/ai/models/strata"
 MODEL_FAMILY="qwen"
@@ -243,7 +251,7 @@ CUDAEOF
 	log "  GPU + CUDA $CUDA_MAJOR (sm_70) verified inside LXC."
 
 	# --- 3/6 Strata source at pinned commit ---
-	log "[3/6] Checking out Strata at pinned commit ${STRATA_COMMIT:0:7} (0.1.41)..."
+	log "[3/6] Checking out Strata at pinned commit ${STRATA_COMMIT:0:7} (${STRATA_VERSION})..."
 	if [ -d "$STRATA_DIR/.git" ]; then
 		git -C "$STRATA_DIR" fetch --depth 1 origin "$STRATA_COMMIT" 2>/dev/null || git -C "$STRATA_DIR" fetch --unshallow 2>/dev/null || true
 		git -C "$STRATA_DIR" checkout -q "$STRATA_COMMIT"
@@ -370,6 +378,24 @@ set_pair("--conversation-cache-mib", "4096")
 json.dump(cfg, open(p, "w"), indent=1)
 PYEOF
 	log "  Phase 1+2 flags: $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['args']))" "$CFG_JSON" 2>/dev/null || echo 'see config')"
+
+	# --- Carry the learned expert profile across a rebuild ---
+	# /opt/strata is on the container rootfs, so a nuke loses the profile the engine
+	# learned from real traffic (94.8% decode hit rate vs ~87% cold; days to climb
+	# back). The deploy script snapshots data/ onto the model dataset, which survives.
+	# Safe across versions: the file is STRP magic + version 1, and 0.1.43's
+	# read_expert_profile (src/core/expert_cache.cpp) still reads version 1.
+	LATEST_SNAP=""
+	for d in "$STRATA_MODEL_DIR"/pre-rebuild-*/data; do
+		[ -s "$d/expert-profile.bin" ] && LATEST_SNAP="$d"
+	done
+	if [ -n "$LATEST_SNAP" ]; then
+		mkdir -p "$STRATA_DIR/data"
+		cp -a "$LATEST_SNAP"/. "$STRATA_DIR/data/" 2>/dev/null || true
+		log "  Restored learned expert profile from ${LATEST_SNAP##*/} ($(du -h "$STRATA_DIR/data/expert-profile.bin" 2>/dev/null | awk '{print $1}'))"
+	else
+		log "  No expert-profile snapshot found - the profile will be re-learned from cold."
+	fi
 
 	cat > /etc/systemd/system/strata.service <<UNITEOF
 [Unit]

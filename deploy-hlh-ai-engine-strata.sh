@@ -243,6 +243,23 @@ echo "  Template present (local:${TEMPLATE_FILE})."
 echo "[2/7] Cleaning stale LXC ${LXC_ID} leftovers..."
 rm -f "/etc/pve/lxc/${LXC_ID}.conf.bak."* 2>/dev/null || true
 if pct status "${LXC_ID}" >/dev/null 2>&1; then
+	# /opt/strata lives on the container's rootfs, so pct destroy takes it with it.
+	# The packs and GGUF shards are on datasets and survive, but the learned expert
+	# profile does not - and it is worth days of traffic (94.8% decode hit rate vs
+	# ~87% cold). Snapshot it onto the surviving model dataset before destroying.
+	SNAP_DIR="${MODEL_HOST_DIR}/strata/pre-rebuild-$(date +%Y%m%d-%H%M%S)"
+	echo "[2/7] Snapshotting /opt/strata tuning -> ${SNAP_DIR} ..."
+	mkdir -p "$SNAP_DIR"
+	pct exec "${LXC_ID}" -- tar czf /root/strata-tuning-snap.tgz -C /opt/strata data 2>/dev/null \
+		&& pct pull "${LXC_ID}" /root/strata-tuning-snap.tgz "${SNAP_DIR}/strata-data.tgz" 2>/dev/null \
+		&& tar xzf "${SNAP_DIR}/strata-data.tgz" -C "$SNAP_DIR" && rm -f "${SNAP_DIR}/strata-data.tgz" \
+		&& echo "  expert profile saved: $(ls "$SNAP_DIR"/data/expert-profile.bin 2>/dev/null || echo MISSING)" \
+		|| echo "  WARNING: no /opt/strata/data snapshot (engine will re-learn the profile from cold)" >&2
+	for _f in strata-iq3_s.json strata-iq3_xxs.json; do
+		pct pull "${LXC_ID}" "/opt/strata/${_f}" "${SNAP_DIR}/${_f}" 2>/dev/null || true
+	done
+	pct pull "${LXC_ID}" /etc/systemd/system/strata.service "${SNAP_DIR}/strata.service" 2>/dev/null || true
+	echo "  snapshot: $(du -sh "$SNAP_DIR" 2>/dev/null | awk '{print $1}') in ${SNAP_DIR}"
 	confirm "hlh-ai-engine-strata (LXC ${LXC_ID}) already exists. Delete it and redeploy? (its /srv/ai/models/strata packs on ${POOL} and SSD shards on ${SSD_DATASET} survive)"
 	echo "[2/7] Deleting existing LXC ${LXC_ID}..."
 	pct stop "${LXC_ID}" >/dev/null 2>&1 || true

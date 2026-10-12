@@ -2,6 +2,30 @@
 
 Active items in progress. These are the current focus areas.
 
+## Active (V100 LXC 115 Strata sm_70) — rebuild on Strata 0.1.43
+
+- [ ] **Nuke and rebuild LXC 115 on Strata 0.1.43** — IaC is ready (CHANGELOG
+  0.4.2). Run on prox01 from the repo checkout:
+  `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`
+  (host driver 580.65.06 is already installed and working, so skip that step).
+  Expect ~45–90 min offline: CUDA 12.8 install + engine compile 10–40 min +
+  pack from the local SSD shards + cold model load.
+  What the IaC now handles by itself: 0.1.43 pin, Phase 1+2 tuning flags, the
+  tuned `strata.service`, and snapshot/restore of the learned expert profile.
+  Verify after: `pct exec 115 -- systemctl is-active strata`,
+  `curl -s localhost/health` (model `qwen3.8-flash-next-iq3_s`), and in
+  `/opt/strata/strata-iq3_s.log` that the expert cache starts near **12,598
+  slots** with hit rate **~94–95%** (a ~87% start means the profile restore
+  did not happen).
+  Rollback if 0.1.43 misbehaves: `STRATA_COMMIT=fb58e0dbc8399662c0e47c76578c6e878b14f6cf ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`
+- [x] Engine pin bumped 0.1.41 -> **0.1.43** (`7695859aa13a`) in
+  `configure-hlh-ai-engine-strata.sh`. Volta sm_70 path confirmed still present
+  in 0.1.43. Note `STRATA_ROUTE_TAIL_SKIP=7` is now on by default and changes
+  answers slightly — see CHANGELOG 0.4.2 for how to turn it off.
+- [x] Pre-rebuild rescue: `/opt/strata` configs, unit, logs and
+  `data/expert-profile.bin` copied to
+  `/srv/ai/models/strata/pre-rebuild-20261012/` (survives `pct destroy`).
+
 ## Active (V100 LXC 115 Strata sm_70) — Phase 3: IQ3_XXS cutover
 
 - [x] **IQ3_XXS cutover** — DONE 2026-10-12 ~00:53 EDT (runbook `3phase-tunning.md`
