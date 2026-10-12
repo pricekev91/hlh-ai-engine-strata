@@ -5,6 +5,23 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-11
+
+### Changed (Phase 2 tuning — 3phase-tunning.md)
+
+- **Runtime flags** (live ad-hoc on LXC 115 + IaC in `configure`):
+  `--pool-workers 10`, `--lookup-chain 2`, `--prompt-cache-tail`,
+  `--conversation-cache-mib 4096` (tuned down from the plan's 8192 to
+  protect the expert page cache).
+
+### Measured (live, 2026-10-11)
+
+- Decode **41.8–47.5 tok/s** on real traffic (baseline typical 34).
+- 91k-token conversation parked/restored in ~0.4–0.7 s; follow-up request
+  reused 91,334 of 92,226 tokens (892 fresh read in 5.2 s).
+- Lookup chain accepted 15 of 34 chained drafts.
+- Rollback: `/opt/strata/strata-iq3_s.json.bak-phase1` + service restart.
+
 ## [0.2.0] - 2026-10-11
 
 ### Changed (Phase 1 tuning — 3phase-tunning.md)

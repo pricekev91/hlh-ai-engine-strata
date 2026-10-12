@@ -81,6 +81,8 @@ Measured after restart:
 
 ## Phase 2 — CPU pool + speculation tuning
 
+**STATUS: APPLIED 2026-10-11 (live ad-hoc + IaC, tagged v0.3.0).** Results below.
+
 6. `--pool-workers 10` — pool currently runs 8 workers + host thread on the
    12-core allocation; more workers serve cache misses faster.
 7. `--lookup-chain 2` — suffix drafts already hit 6/6 on repetitive code
@@ -90,6 +92,30 @@ Measured after restart:
 9. `--conversation-cache-mib 8192` (tune to headroom) — parked-conversation
    RAM cache is off by default; speeds session restore with many OpenCode
    sessions (~23 GB host headroom available).
+
+### Phase 2 applied — verification (2026-10-11, live LXC 115)
+
+| Flag | Honored? | Evidence |
+|---|---|---|
+| `--pool-workers 10` | ✅ | "10 pool workers ... the host thread on 0 (draining too)"; participating threads 11; tasks/phase 33 (was 27) |
+| `--lookup-chain 2` | ✅ | "lookup chain: 19 of 101 windows, 15 of 34 chained drafts accepted" |
+| `--prompt-cache-tail` | ✅ (silent) | accepted at start, no dedicated log line; requests show 6 checkpoints |
+| `--conversation-cache-mib 4096` | ✅ | "parked 91334 tokens in 695 ms"; "restored 91334 tokens (live) in 382.7 ms" -> next request reused 91,334 of 92,226 tokens, only 892 fresh read in 5.2 s |
+
+Measured on real traffic after restart:
+
+- Decode **41.8–47.5 tok/s** (baseline typical 34, Phase 1 warm 43.5).
+- Session restore: 91k-token conversation back live in **0.4 s** (was: full
+  re-prefill).
+- First request after restart was cold (91k tokens in 771 s while the engine
+  was still pinning experts; 12.4M major faults during warmup) — subsequent
+  requests: 33–56 faults. Restart + immediate heavy traffic is the one rough
+  edge; warm state is clean.
+- Memory: CT 50.8/57 GB, parked conversations ~1–2 GB of the 4 GB budget,
+  ~15 GB page cache intact.
+- Hit rate 89.7% — still below the 94–95.5% baseline while the learned
+  profile re-adapts; watch over the coming days.
+- Rollback: `/opt/strata/strata-iq3_s.json.bak-phase1` + service restart.
 
 ## Phase 3 — model + hardware
 
