@@ -5,22 +5,31 @@ Active items in progress. These are the current focus areas.
 ## Active (V100 LXC 115 Strata sm_70) — rebuild on Strata 0.1.43
 
 - [ ] **Nuke and rebuild LXC 115 on Strata 0.1.43** — IaC is ready (CHANGELOG
-  0.4.2). Run on prox01 from the repo checkout:
+  0.4.2 + 0.5.0). Run on prox01 from the repo checkout:
   `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`
   (host driver 580.65.06 is already installed and working, so skip that step).
-  Expect ~45–90 min offline: CUDA 12.8 install + engine compile 10–40 min +
-  pack from the local SSD shards + cold model load.
+  Expect ~55–110 min offline: CUDA 12.8 install + engine compile 10–40 min +
+  **image encoder: mmproj 0.9 GB download + `strata-vision` compile 10–20 min
+  (new in 0.5.0, `--vision gpu` is now the default)** + pack from the local SSD
+  shards + cold model load.
   What the IaC now handles by itself: 0.1.43 pin, Phase 1+2 tuning flags, the
   tuned `strata.service`, and the learned expert profile — which now lives on
   the model dataset (`/srv/ai/models/strata/data/iq3_s/expert-profile.bin`)
   so it survives `pct destroy` without the snapshot path (CHANGELOG 0.4.3).
   Verify after: `pct exec 115 -- systemctl is-active strata`,
   `curl -s localhost/health` (model `qwen3.8-flash-next-iq3_s`),
+  **`curl -s localhost/health | grep -o '"images": *[a-z]*'` = `true`** and one
+  real picture through `/v1/chat/completions` (CHANGELOG 0.5.0 — **no upstream
+  sm_70 vision report exists**, so this is the first measurement),
   `ls -l /srv/ai/models/strata/data/iq3_s/expert-profile.bin` (non-zero, and
   growing every 10 min), and in `/opt/strata/strata-iq3_s.log` that the
   expert cache starts near **12,598 slots** with hit rate **~94–95%** (a
-  ~87% start means the profile did not load).
+  ~87% start means the profile did not load). Expect the encoder to take ~1.2 GB
+  of the card, i.e. **~1,000 fewer slots** than the text-only baseline — if the
+  hit rate or decode drops more than ~5%, re-run with `--vision-tokens 512` or
+  `--vision cpu` (README "Vision (images)").
   Rollback if 0.1.43 misbehaves: `STRATA_COMMIT=fb58e0dbc8399662c0e47c76578c6e878b14f6cf ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`
+  Rollback if vision breaks the text path: `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --vision no --yes`
 - [x] Engine pin bumped 0.1.41 -> **0.1.43** (`7695859aa13a`) in
   `configure-hlh-ai-engine-strata.sh`. Volta sm_70 path confirmed still present
   in 0.1.43. Note `STRATA_ROUTE_TAIL_SKIP=7` is now on by default and changes

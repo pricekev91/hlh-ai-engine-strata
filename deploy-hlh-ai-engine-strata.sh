@@ -8,6 +8,7 @@ usage() {
 	cat <<'EOF'
 Usage:
 	./deploy-hlh-ai-engine-strata.sh [--skip-host-driver] [--keep-111] [--no-bootstrap] [--yes] [--model M]
+	                                 [--vision gpu|cpu|no] [--vision-tokens N]
 
 Strata path (Qwen3.8-Flash-Next IQ3_S/IQ3_XXS on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	1) Verify host NVIDIA 580.65.06 (R580, last for Volta GV100 cc 7.0) + V100 present
@@ -23,6 +24,8 @@ Strata path (Qwen3.8-Flash-Next IQ3_S/IQ3_XXS on Tesla V100 GV100GL 32GB via OCu
 	7) Start container + push/run Strata bootstrap
 	   (CUDA 12.8 + engine build sm_70 EXPERIMENTAL -DSTRATA_EXPERIMENTAL_SM60=ON
 	    + IQ3_S pack from LOCAL SSD shards, no model download
+	    + image encoder: mmproj-Qwen3.8-Flash-Next-BF16.gguf (0.9 GB download)
+	      + strata-vision compile, --vision gpu|cpu|no (default gpu)
 	    + systemd strata.service on :80)
 
 NOTES:
@@ -38,6 +41,12 @@ NOTES:
 	  (mp0, same shared mount as hlh-ai-engine-egpu).
 	- First bootstrap is long: engine compile ~10-40 min + pack from local SSD shards
 	  (no model download; shards auto-seeded to the SSD dataset from /srv/ai/models).
+	- Vision (images) is ON by default since 0.5.0: setup downloads the 0.9 GB mmproj
+	  encoder into /srv/ai/models/strata/models (mp0 HDD - NOT the SSD dataset, the
+	  rpool/strata-models pool has no room for it) and compiles strata-vision for
+	  sm_70 (~10-20 min extra). The GPU encoder holds ~1.2 GB of the 32 GB card, so
+	  the expert cache loses ~1,000 slots. --vision cpu keeps every slot and encodes
+	  on the CPU instead; --vision no is the pre-0.5.0 text-only install.
 EOF
 }
 
@@ -89,6 +98,15 @@ LXC_ROOTFS_SIZE="64"
 # Phase 3 (3phase-tunning.md §3.4): was hardcoded to IQ3_S, which would not
 # seed IQ3_XXS on a rebuild. Override with --model or MODEL_QUANT=...
 MODEL_QUANT="${MODEL_QUANT:-IQ3_S}"
+# Vision (images): gpu | cpu | no, forwarded to the bootstrap as --vision.
+# gpu is the default since 0.5.0 (encoder on the V100, ~1.2 GB of VRAM);
+# cpu keeps every expert slot and pays ~3 s/picture; no = text only.
+# Override with --vision or VISION_MODE=...
+VISION_MODE="${VISION_MODE:-gpu}"
+# Max tokens one picture becomes (bootstrap --vision-tokens). Empty = setup's
+# default (1024 on gpu, 300 on cpu). Lower it if the encoder does not fit the
+# card beside the 128K KV + expert cache.
+VISION_TOKENS="${VISION_TOKENS:-}"
 # RAM sizing (IQ3_S/IQ3_XXS, --resident-experts low-RAM mode; validated live 2026-10-10):
 # Strata pins ~26.7 GiB of experts page-locked in RAM (the complement of the GPU
 # cache) + ~2.7 GiB runtime. The rest of the allocation is page cache for the
@@ -103,7 +121,6 @@ LXC_CORES="12"
 LXC_SWAP="512"
 LXC_IP_CONFIG="192.168.1.15/24"
 LXC_GATEWAY="192.168.1.1"
-LXC_DESC="Strata AI engine (Qwen3.8-Flash-Next ${MODEL_QUANT}, 128K ctx) - CUDA $CUDA_MAJOR sm_70 EXPERIMENTAL build (-DSTRATA_EXPERIMENTAL_SM60=ON) + driver $NVIDIA_DRIVER_VERSION_SHORT for Tesla V100 (GV100 32GB cc 7.0) via OCuLink c5:00.0, model shards on $SSD_DATASET (SSD) -> /srv/ssd-models, packs on $POOL:/srv/ai/models/strata, port 80"
 
 # LXC 111 = hlh-ai-engine-egpu (llama.cpp, same V100). Stopped at cutover.
 EGPU_LXC_ID=111
@@ -120,6 +137,8 @@ while [[ $# -gt 0 ]]; do
 		--no-bootstrap) NO_BOOTSTRAP=true; shift ;;
 		--yes) ASSUME_YES=true; shift ;;
 		--model) MODEL_QUANT="$2"; shift 2 ;;
+		--vision) VISION_MODE="$2"; shift 2 ;;
+		--vision-tokens) VISION_TOKENS="$2"; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "ERROR: Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
@@ -128,6 +147,18 @@ case "$MODEL_QUANT" in
 	Q2_0|IQ2_XS|IQ3_XXS|IQ3_S) ;;
 	*) echo "ERROR: --model must be Q2_0 | IQ2_XS | IQ3_XXS | IQ3_S (got: $MODEL_QUANT)" >&2; exit 1 ;;
 esac
+case "$VISION_MODE" in
+	yes) VISION_MODE="gpu" ;;
+	gpu|cpu|no) ;;
+	*) echo "ERROR: --vision must be gpu | cpu | no (got: $VISION_MODE)" >&2; exit 1 ;;
+esac
+if [ -n "$VISION_TOKENS" ] && ! [[ "$VISION_TOKENS" =~ ^[0-9]+$ ]]; then
+	echo "ERROR: --vision-tokens takes a number of tokens, e.g. 512 (got: $VISION_TOKENS)" >&2; exit 1
+fi
+
+# Built after the option parsing on purpose: --model/--vision must show up in the
+# Proxmox description, and pct create runs much later in this script.
+LXC_DESC="Strata AI engine (Qwen3.8-Flash-Next ${MODEL_QUANT}, 128K ctx, vision ${VISION_MODE}) - CUDA $CUDA_MAJOR sm_70 EXPERIMENTAL build (-DSTRATA_EXPERIMENTAL_SM60=ON) + driver $NVIDIA_DRIVER_VERSION_SHORT for Tesla V100 (GV100 32GB cc 7.0) via OCuLink c5:00.0, model shards on $SSD_DATASET (SSD) -> /srv/ssd-models, packs on $POOL:/srv/ai/models/strata, port 80"
 
 confirm() { # $1 = prompt text
 	[[ "$ASSUME_YES" == "true" ]] && return 0
@@ -394,12 +425,23 @@ if [[ "$NO_BOOTSTRAP" == "true" ]]; then
 	echo "[6/7] Skipping bootstrap (--no-bootstrap). Run later:"
 	echo "  ./configure-hlh-ai-engine-strata.sh"
 else
-	echo "[6/7] Running in-container Strata bootstrap (CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, $MODEL_QUANT from local SSD shards)..."
-	echo "      This is the long step: engine compile ~10-40 min + pack from SSD shards (no model download)."
+	echo "[6/7] Running in-container Strata bootstrap (CUDA $CUDA_MAJOR, sm_70 EXPERIMENTAL, $MODEL_QUANT from local SSD shards, vision $VISION_MODE)..."
+	echo "      This is the long step: engine compile ~10-40 min + pack from SSD shards (no model download)"
+	if [[ "$VISION_MODE" != "no" ]]; then
+		echo "      + image encoder: mmproj-Qwen3.8-Flash-Next-BF16.gguf (0.9 GB download) + strata-vision compile ~10-20 min."
+	fi
 	pct exec "${LXC_ID}" -- mkdir -p /root/strata-bootstrap
 	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --perms 0755
 	pct push "${LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
-	pct exec "${LXC_ID}" -- bash /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --bootstrap-inside
+	# Forward the quant + vision mode: the pushed script re-parses its own argv
+	# inside the CT, so without these a --model IQ3_XXS seed is followed by an
+	# IQ3_S pack and --vision is silently lost (the pre-0.5.0 text-only install).
+	BOOT_ARGS=(--bootstrap-inside --model "$MODEL_QUANT" --vision "$VISION_MODE")
+	if [ -n "$VISION_TOKENS" ]; then
+		BOOT_ARGS+=(--vision-tokens "$VISION_TOKENS")
+		echo "      + --vision-tokens ${VISION_TOKENS} (max tokens per picture)."
+	fi
+	pct exec "${LXC_ID}" -- bash /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh "${BOOT_ARGS[@]}"
 fi
 
 # --- 7/7 Verify + summary ---
@@ -415,6 +457,19 @@ if [[ "$NO_BOOTSTRAP" != "true" ]]; then
 	else
 		echo "WARNING: strata active but /health not ready yet (model load can take several minutes) - check: pct exec ${LXC_ID} -- journalctl -u strata -f" >&2
 	fi
+	# Vision gate: /health carries "images": true|false. Say it here rather than
+	# letting it surface as a client-side "started without the vision encoder".
+	if [[ "$VISION_MODE" != "no" ]]; then
+		_HEALTH="$(pct exec "${LXC_ID}" -- curl -fsS -m 5 http://127.0.0.1:80/health 2>/dev/null || true)"
+		case "$_HEALTH" in
+			*'"images": true'*|*'"images":true'*)
+				echo "  Vision OK     : /health reports images=true (encoder ${VISION_MODE})" ;;
+			'')
+				echo "WARNING: could not read /health to confirm the image encoder - check: curl -s http://127.0.0.1:80/health" >&2 ;;
+			*)
+				echo "WARNING: --vision ${VISION_MODE} but /health does not report images=true - images will be refused. Check the encoder start in /opt/strata/strata-*.log (VRAM: the GPU encoder wants ~1.2 GB beside the 128K KV)." >&2 ;;
+		esac
+	fi
 fi
 
 echo ""
@@ -422,6 +477,7 @@ echo "Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) at ${LXC_IP_CONFIG%%/*}."
 echo "  Strata web UI + API : http://192.168.1.15:80   (OpenAI /v1, Anthropic /v1/messages)"
 echo "  Model shards (SSD)  : ${MODEL_SSD_HOST_DIR} (${SSD_DATASET}) <-> ${MODEL_SSD_LXC_DIR} (LXC)"
 echo "  Model packs         : ${MODEL_HOST_DIR}/strata (host) <-> ${MODEL_LXC_DIR}/strata (LXC) on ${POOL}"
+echo "  Image encoder       : vision ${VISION_MODE} (mmproj-Qwen3.8-Flash-Next-BF16.gguf in ${MODEL_LXC_DIR}/strata/models, helper /opt/strata/engine-cuda12/strata-vision)"
 echo "  Strata source       : /opt/strata (pinned commit, engine in /opt/strata/engine)"
 echo "  V100 freed from     : LXC ${EGPU_LXC_ID} (hlh-ai-engine-egpu, stopped, onboot 0, config intact)"
 echo "  Host driver pinned  : $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"

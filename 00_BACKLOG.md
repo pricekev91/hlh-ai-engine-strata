@@ -17,6 +17,20 @@ in the codebase.
   re-run setup with `--low-ram on` (32 GB card holds hot experts, RAM the rest).
 - API key: Strata supports `--api-key`; enable if the :80 endpoint ever leaves
   the trusted LAN.
+- **Vision on Volta is untested** (0.5.0 turns `--vision gpu` on by default;
+  upstream documents vision for Turing+ and never mentions the encoder in
+  `NVIDIA_V100.md` / `OLDER_GPUS.md`). After the first rebuild with the encoder,
+  measure the text cost of the ~1,000 expert slots it takes (baseline: 12,598
+  slots, 94–95 % hit, 41.8–47.5 tok/s decode). If decode drops more than ~5 %:
+  `--vision-tokens 512` → `--vision cpu` → the on-demand encoder
+  (`vram_elastic: true` + `vision.elastic: true`, `elastic_mib` 2048 /
+  `elastic_idle_s` 120 — NVIDIA-only, upstream measured it on an AMD card only).
+  Worth an upstream report either way (works or does not, on cc 7.0).
+- mmproj is re-downloaded (0.9 GB from HF) on every greenfield bootstrap; it
+  lives in `/srv/ai/models/strata/models` (mp0) so a rebuild that keeps the
+  dataset does not re-fetch it. Only seed it onto `rpool/strata-models` if that
+  pool ever has room (9.45 G avail today, and the shard pair owns it) — a
+  rebuild on a box without HF egress needs the file pre-seeded instead.
 
 ## GPU / Performance (V100 GV100GL 32GB)
 

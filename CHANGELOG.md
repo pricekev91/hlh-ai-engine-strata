@@ -5,6 +5,61 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-15
+
+### Added (vision — the engine can read pictures)
+
+- **`--vision` defaults to `gpu`** (`configure-…sh: STRATA_VISION`,
+  `deploy-…sh: VISION_MODE`). The IaC had always passed `--vision no`, so
+  `strata-vision` was never compiled and the mmproj encoder never fetched:
+  `/health` reported `"images": false`, `/v1/models` reported
+  `"input_modalities": ["text"]`, and every image request died with
+  `this server was started without the vision encoder` (HTTP 400).
+- New flags: `--vision gpu|cpu|no` and `--vision-tokens N` on the bootstrap,
+  `--vision gpu|cpu|no` and `--vision-tokens N` on the deploy script. Both are
+  forwarded into the container (`--bootstrap-inside` re-parses argv inside the
+  CT, so a flag that is not forwarded is silently lost). `yes` is accepted as a
+  synonym for `gpu` because `setup.sh` speaks yes/no.
+- What the GPU path costs here: `mmproj-Qwen3.8-Flash-Next-BF16.gguf`
+  (907,543,008 B, sha256 `b1a82259…49bd0`, ISTA-DASLab) into
+  `/srv/ai/models/strata/models` — **mp0, the HDD pool**, because
+  `rpool/strata-models` has no room and the encoder is read once at start, not
+  per token — plus a ~10–20 min `strata-vision` compile in `build-vision-cuda12`
+  with the *same* `CMAKE_CUDA_ARCHITECTURES` as the engine (sm_70, CUDA 12.8),
+  installed next to it in `engine-cuda12/` (`engine_dir()` picks that folder for
+  toolkit 12 — not `engine/`).
+  The encoder holds ~1.2 GB at 1024 image tokens → ~1,000 fewer expert slots
+  (upstream: 2–8 % slower text; here the 94–95 % hit rate is the decode lever).
+- Pre-flight says which of setup's three mmproj paths it takes (already in
+  `<data-dir>/models` / in `--gguf-dir`, used in place / download 0.9 GB).
+
+### Fixed
+
+- **`deploy-…sh --model` never reached the bootstrap.** `[6/7]` pushed the
+  bootstrap and ran it with only `--bootstrap-inside`, so `--model IQ3_XXS`
+  seeded the SSD dataset with XXS and then packed the compiled-in default
+  IQ3_S. `--model` and `--vision` are now forwarded explicitly.
+- **The LXC description ignored the CLI.** `LXC_DESC` was built *before* option
+  parsing, so `pct create` always wrote the default quant and vision mode. It is
+  now built after validation.
+- **Vision is verified, not assumed.** The bootstrap fails when no
+  `strata-vision` helper is found (config `vision.exe`, else
+  `engine-cuda12/strata-vision`, else `engine/strata-vision`) or when the
+  config's `vision.mmproj` is not a file, and both scripts warn when `/health`
+  does not report `"images": true` after start. A silent text-only fallback is
+  what made this invisible for so
+  long. Re-running `setup.sh` still rewrites `strata-iq3_s.json`, but the
+  Phase 1+2 tuning patch runs *after* setup in the same bootstrap, so a nuke +
+  rebuild keeps the tuning and now also the encoder.
+
+### Docs
+
+- README: new **Vision (images)** section — weights, binary, VRAM cost, the
+  `--vision-tokens` / `--vision cpu` / `vram_elastic` escape hatches, and the
+  post-rebuild checks. Caveat recorded: **upstream has no sm_70 vision report**
+  (`NVIDIA_V100.md` / `OLDER_GPUS.md` never mention the encoder path), so the
+  first rebuild with vision is an experiment, not a known-good path.
+
 ## [0.4.3] - 2026-10-12
 
 ### Changed (learned expert profile lives on the model dataset)

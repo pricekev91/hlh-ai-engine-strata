@@ -9,6 +9,7 @@ usage() {
 	cat <<'EOF'
 Usage:
 	./configure-hlh-ai-engine-strata.sh [--lxc-id ID] [--host HOST] [--model M] [--gguf-dir DIR]
+	                                   [--vision gpu|cpu|no] [--vision-tokens N]
 	                                   [--bootstrap-inside]
 
 Strata path (Qwen3.8-Flash-Next IQ3_S on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
@@ -20,7 +21,7 @@ Strata path (Qwen3.8-Flash-Next IQ3_S on Tesla V100 GV100GL 32GB via OCuLink) - 
 	  community path, Strata #295/#236)
 	- model install (default IQ3_S from LOCAL GGUF shards in /srv/ssd-models (SSD
 	  bind, mp1; no ~84 GB download + pack) into /srv/ai/models/strata (shared host
-	  mount), 128K context, int8 KV, vision off
+	  mount), 128K context, k8v4 KV, vision ON (GPU encoder)
 	- systemd strata.service on port 80 (web UI + OpenAI /v1 + Anthropic /v1/messages)
 
 Options:
@@ -37,6 +38,23 @@ Options:
 	               -00002-of-00002.gguf (27G) from ISTA-DASLab/
 	               Qwen3.8-Flash-Next-GSQ-RCO-GGUF:IQ3_S; the ~5 GB MTP draft
 	               layer is still fetched)
+	--vision V     gpu | cpu | no (default gpu - images work).
+	               gpu: setup downloads mmproj-Qwen3.8-Flash-Next-BF16.gguf
+	               (0.9 GB, 27-layer ViT + projector) into
+	               <data-dir>/models = /srv/ai/models/strata/models (mp0, HDD -
+	               NOT the SSD dataset) and compiles the strata-vision helper
+	               with CUDA at the same sm_70 archs as the engine (~10-20 min
+	               extra). The encoder holds ~1.2 GB of the 32 GB card at 1024
+	               image tokens, so ~1,000 fewer expert slots: upstream measures
+	               2-8% slower text. Volta has no upstream vision report - see
+	               README "Vision (images)".
+	               cpu: no VRAM cost (the expert cache keeps every slot), about
+	               3 s per picture at 300 tokens, and it competes with
+	               --pool-workers 10 on these 12 cores.
+	               no: text only (the pre-0.5.0 behaviour).
+	--vision-tokens N  most tokens one picture becomes (setup default: 1024 on
+	               gpu, 300 on cpu). Lower it if the encoder does not fit
+	               beside the 128K KV + expert cache.
 
 Host side (default): pushes this script into LXC and runs it with --bootstrap-inside.
 --bootstrap-inside: run the bootstrap directly inside the LXC (called by the deploy
@@ -95,7 +113,20 @@ STRATA_CONTEXT="131072"      # 128K - required (16K is unusable for this workloa
 # scores) + rotated Q4_0 V, 816 vs 1056 B/cell - frees ~23% of the 128K KV for
 # expert cache slots. setup.sh accepts int8|q4_0|k8v4.
 STRATA_KV="k8v4"
-STRATA_VISION="no"
+# Vision is ON by default since 0.5.0. setup.sh then (a) downloads the 0.9 GB
+# mmproj-Qwen3.8-Flash-Next-BF16.gguf into <data-dir>/models (mp0 HDD, not the
+# SSD dataset) and (b) compiles strata-vision from llama.cpp's mtmd with
+# -DSTRATA_VISION_CUDA=ON at the same CMAKE_CUDA_ARCHITECTURES as the engine,
+# i.e. sm_70 on the CUDA 12.8 toolkit (setup.py: build in build-vision-cuda12/,
+# installed next to the engine in engine-cuda12/ - engine_dir() picks that folder
+# for toolkit 12, which is what sm_70 requires).
+# Cost on this card: the encoder holds ~1.2 GB at 1024 image tokens, so the
+# expert cache loses ~1,000 slots (upstream: 2-8% slower text; here the hit
+# rate is the decode lever, so watch it in strata-iq3_s.log). --vision cpu
+# keeps every slot and pays ~3 s/picture on cores the expert pool also wants.
+STRATA_VISION="gpu"
+STRATA_VISION_TOKENS=""   # --vision-tokens: empty = setup's default (1024 gpu / 300 cpu)
+MMPROJ_NAME="mmproj-Qwen3.8-Flash-Next-BF16.gguf"   # 907,543,008 B, ISTA-DASLab
 STRATA_PORT="80"
 STRATA_HOST="0.0.0.0"
 STRATA_GPU="0"
@@ -110,11 +141,24 @@ while [[ $# -gt 0 ]]; do
 		--host) HOST_IP="$2"; shift 2 ;;
 		--model) MODEL_NAME="$2"; shift 2 ;;
 		--gguf-dir) GGUF_DIR="$2"; shift 2 ;;
+		--vision) STRATA_VISION="$2"; shift 2 ;;
+		--vision-tokens) STRATA_VISION_TOKENS="$2"; shift 2 ;;
 		--bootstrap-inside) BOOTSTRAP_INSIDE=true; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "ERROR: Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
 done
+case "$STRATA_VISION" in
+	yes) STRATA_VISION="gpu" ;;   # setup.sh accepts yes/no too; we keep gpu/cpu/no
+	gpu|cpu|no) ;;
+	*) echo "ERROR: --vision must be gpu | cpu | no (got: $STRATA_VISION)" >&2; exit 1 ;;
+esac
+if [ -n "$STRATA_VISION_TOKENS" ] && ! [[ "$STRATA_VISION_TOKENS" =~ ^[0-9]+$ ]]; then
+	echo "ERROR: --vision-tokens takes a number of tokens, e.g. 768 (got: $STRATA_VISION_TOKENS)" >&2; exit 1
+fi
+VISION_LABEL="vision off"
+if [ "$STRATA_VISION" = "gpu" ]; then VISION_LABEL="vision on, GPU encoder"; fi
+if [ "$STRATA_VISION" = "cpu" ]; then VISION_LABEL="vision on, CPU encoder"; fi
 
 # --- Inside-container bootstrap ---
 if $BOOTSTRAP_INSIDE; then
@@ -296,6 +340,18 @@ CUDAEOF
 		done
 		log "      local shards OK: $(du -sh "${GGUF_DIR}/${GGUF_STEM}-00001-of-00002.gguf" | awk '{print $1}') + $(du -sh "${GGUF_DIR}/${GGUF_STEM}-00002-of-00002.gguf" | awk '{print $1}') (no model download)"
 	fi
+	# Vision pre-flight: setup looks for the encoder in <data-dir>/models first, then
+	# in --gguf-dir (used in place), and only then downloads it. Say which of the
+	# three paths it will take, so a rebuild that has no HF egress is not a surprise.
+	if [ "$STRATA_VISION" != "no" ]; then
+		if [ -s "$STRATA_MODEL_DIR/models/$MMPROJ_NAME" ]; then
+			log "      mmproj already in ${STRATA_MODEL_DIR}/models - no download"
+		elif [ -n "$GGUF_DIR" ] && [ -s "$GGUF_DIR/$MMPROJ_NAME" ]; then
+			log "      mmproj found in ${GGUF_DIR} - setup reads it in place (no download)"
+		else
+			log "      mmproj ${MMPROJ_NAME} (0.9 GB) will be downloaded from ISTA-DASLab into ${STRATA_MODEL_DIR}/models"
+		fi
+	fi
 	SETUP_ARGS=(--setup
 		--family "$MODEL_FAMILY"
 		--model "$MODEL_NAME"
@@ -312,6 +368,10 @@ CUDAEOF
 	if [ -n "$GGUF_DIR" ]; then
 		log "      --gguf-dir ${GGUF_DIR} (using pre-downloaded shards, no model download)"
 		SETUP_ARGS+=(--gguf-dir "$GGUF_DIR")
+	fi
+	if [ "$STRATA_VISION" != "no" ] && [ -n "$STRATA_VISION_TOKENS" ]; then
+		log "      --vision-tokens ${STRATA_VISION_TOKENS} (max tokens per picture; setup's default is 1024 on gpu, 300 on cpu)"
+		SETUP_ARGS+=(--vision-tokens "$STRATA_VISION_TOKENS")
 	fi
 	./setup.sh "${SETUP_ARGS[@]}"
 	log "  Strata setup complete."
@@ -402,6 +462,31 @@ json.dump(cfg, open(p, "w"), indent=1)
 PYEOF
 	log "  Phase 1+2 flags: $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['args']))" "$CFG_JSON" 2>/dev/null || echo 'see config')"
 
+	# --- Vision: verify setup actually wired the encoder ---
+	# A silent text-only fallback is what bit this board before: without the encoder
+	# every image request dies with "this server was started without the vision
+	# encoder". Both halves must exist - the mtmd helper binary AND the mmproj weights.
+	# The helper sits in engine-cuda12/ here, not engine/: setup.py's engine_dir()
+	# picks engine-cuda12 for the CUDA 12 toolkit, which is what sm_70 requires.
+	if [ "$STRATA_VISION" != "no" ]; then
+		VIS_EXE="$("$STRATA_DIR/.venv/bin/python" -c "import json,sys; print((json.load(open(sys.argv[1])).get('vision') or {}).get('exe',''))" "$CFG_JSON" 2>/dev/null || true)"
+		VIS_MMPROJ="$("$STRATA_DIR/.venv/bin/python" -c "import json,sys; print((json.load(open(sys.argv[1])).get('vision') or {}).get('mmproj',''))" "$CFG_JSON" 2>/dev/null || true)"
+		if [ -z "$VIS_EXE" ] || [ ! -x "$VIS_EXE" ]; then
+			for _ve in "$STRATA_DIR/engine-cuda12/strata-vision" "$STRATA_DIR/engine/strata-vision"; do
+				if [ -x "$_ve" ]; then VIS_EXE="$_ve"; break; fi
+			done
+		fi
+		if [ -z "$VIS_EXE" ] || [ ! -x "$VIS_EXE" ]; then
+			fatal "vision=${STRATA_VISION} but no strata-vision helper in ${STRATA_DIR}/engine-cuda12 or ${STRATA_DIR}/engine - the image encoder build failed (see the setup log above)"
+		fi
+		if [ -z "$VIS_MMPROJ" ] || [ ! -s "$VIS_MMPROJ" ]; then
+			fatal "vision=${STRATA_VISION} but the config's vision.mmproj is '${VIS_MMPROJ:-<unset>}' (not a file) - setup did not fetch ${MMPROJ_NAME} (0.9 GB) into ${STRATA_MODEL_DIR}/models"
+		fi
+		VIS_GPU="no"
+		if [ "$STRATA_VISION" = "gpu" ]; then VIS_GPU="yes"; fi
+		log "  Vision wired: exe=${VIS_EXE}, mmproj=${VIS_MMPROJ##*/} ($(du -h "$VIS_MMPROJ" | awk '{print $1}')), encoder on GPU: $VIS_GPU"
+	fi
+
 	# --- Learned expert profile: the dataset path is the source of truth ---
 	# PROFILE_PATH lives on the model dataset, so it survives pct destroy on its own.
 	# Seed it from the newest pre-rebuild snapshot (or leave it alone if the engine
@@ -430,7 +515,7 @@ PYEOF
 
 	cat > /etc/systemd/system/strata.service <<UNITEOF
 [Unit]
-Description=Strata AI Engine (Qwen3.8-Flash-Next ${MODEL_NAME}, ${STRATA_CONTEXT} ctx) - CUDA ${CUDA_MAJOR} sm_70 EXPERIMENTAL build on Tesla V100 32GB, port ${STRATA_PORT}
+Description=Strata AI Engine (Qwen3.8-Flash-Next ${MODEL_NAME}, ${STRATA_CONTEXT} ctx, ${VISION_LABEL}) - CUDA ${CUDA_MAJOR} sm_70 EXPERIMENTAL build on Tesla V100 32GB, port ${STRATA_PORT}
 After=network.target
 # Explicit restart budget (systemd's implicit default is 5 starts in 10 s): with
 # RestartSec=10 a crash-loop gets 60 s before the unit goes to failed state.
@@ -482,6 +567,18 @@ UNITEOF
 	else
 		log "  /health OK"
 	fi
+	# Vision gate: the server says in /health whether the encoder came up. Text-only
+	# here means every image request 400s, so say it out loud instead of letting it
+	# surface as a client error days later.
+	if [ "$READY" = "1" ] && [ "$STRATA_VISION" != "no" ]; then
+		HEALTH_JSON="$(curl -fsS -m 5 "http://127.0.0.1:${STRATA_PORT}/health" 2>/dev/null || true)"
+		case "$HEALTH_JSON" in
+			*'"images": true'*|*'"images":true'*)
+				log "  Vision live: /health reports images=true" ;;
+			*)
+				log "  WARNING: vision=${STRATA_VISION} requested but /health does not report images=true - images will be refused. Check the encoder start in ${STRATA_DIR}/strata-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]').log (VRAM: the encoder wants ~1.2 GB beside the 128K KV)." ;;
+		esac
+	fi
 	echo ""
 	echo "=============================================================="
 	echo "  Strata bootstrap COMPLETE - LXC 115 (hlh-ai-engine-strata)"
@@ -489,7 +586,7 @@ UNITEOF
 	nvidia-smi 2>&1 | head -15 || true
 	echo ""
 	echo "  Strata web UI + API : http://${LXC_IP}:${STRATA_PORT}  (OpenAI /v1, Anthropic /v1/messages)"
-	echo "  Model               : Qwen3.8-Flash-Next ${MODEL_NAME} (${STRATA_CONTEXT} ctx, ${STRATA_KV} KV, vision off)"
+	echo "  Model               : Qwen3.8-Flash-Next ${MODEL_NAME} (${STRATA_CONTEXT} ctx, ${STRATA_KV} KV, ${VISION_LABEL})"
 	echo "  Model shards        : ${GGUF_DIR} (SSD bind mp1, host rpool/strata-models) - no download"
 	echo "  Model packs         : ${STRATA_MODEL_DIR} (shared host mount, pack output)"
 	echo "  Engine              : ${STRATA_DIR}/engine (sm_70 EXPERIMENTAL, CUDA ${CUDA_MAJOR})"
@@ -499,6 +596,11 @@ UNITEOF
 	echo "    pct exec 115 -- nvidia-smi -L"
 	echo "    curl -s http://${LXC_IP}:${STRATA_PORT}/health"
 	echo "    curl -s http://${LXC_IP}:${STRATA_PORT}/v1/models"
+	if [ "$STRATA_VISION" != "no" ]; then
+		echo "    images  : curl -s http://${LXC_IP}:${STRATA_PORT}/health | grep -o '\"images\": *[a-z]*'   (want true)"
+		echo "            then one real picture through /v1/chat/completions (an image_url part);"
+		echo "            a refusal naming 'the vision encoder' means the encoder did not come up."
+	fi
 	echo ""
 	exit 0
 fi
@@ -526,16 +628,23 @@ fi
 log "Pushing configure script into LXC via pct exec..."
 pct exec "${TARGET_LXC_ID}" -- mkdir -p /root/strata-bootstrap
 pct push "${TARGET_LXC_ID}" "${SCRIPT_DIR}/configure-hlh-ai-engine-strata.sh" /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh --perms 0755
-log "  (CUDA $CUDA_MAJOR + userspace ${DRIVER_BRANCH}/${NVIDIA_DRIVER_VERSION} + Strata pinned ${STRATA_COMMIT:0:7} + ${MODEL_NAME} from ${GGUF_DIR:-download} + systemd strata.service)"
-log "  This is the long step: engine compile ~10-40 min + pack from local shards (no model download; ~5 GB MTP draft fetched)."
+log "  (CUDA $CUDA_MAJOR + userspace ${DRIVER_BRANCH}/${NVIDIA_DRIVER_VERSION} + Strata pinned ${STRATA_COMMIT:0:7} + ${MODEL_NAME} from ${GGUF_DIR:-download} + vision ${STRATA_VISION} + systemd strata.service)"
+log "  This is the long step: engine compile ~10-40 min + pack from local shards (no model download; ~5 GB MTP draft fetched)"
+if [ "$STRATA_VISION" != "no" ]; then
+	log "    + image encoder: ${MMPROJ_NAME} (0.9 GB download into ${STRATA_MODEL_DIR}/models) + strata-vision compile ~10-20 min."
+fi
 pct push "${TARGET_LXC_ID}" "/usr/bin/nvidia-smi" "/tmp/nvidia-smi" --perms 0755
 log "Running bootstrap inside LXC (pct exec)..."
 # Forward model choices: the pushed script re-parses its own argv inside the LXC,
 # so --model/--gguf-dir must be passed explicitly or the bootstrap silently falls
-# back to compiled-in defaults after the push.
-INNER_ARGS=(--bootstrap-inside --model "$MODEL_NAME")
+# back to compiled-in defaults after the push. Same for --vision: without it a
+# --vision no/cpu run from the host would still pack text-only or GPU-only.
+INNER_ARGS=(--bootstrap-inside --model "$MODEL_NAME" --vision "$STRATA_VISION")
 if [ -n "$GGUF_DIR" ]; then
 	INNER_ARGS+=(--gguf-dir "$GGUF_DIR")
+fi
+if [ -n "$STRATA_VISION_TOKENS" ]; then
+	INNER_ARGS+=(--vision-tokens "$STRATA_VISION_TOKENS")
 fi
 pct exec "${TARGET_LXC_ID}" -- bash /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh "${INNER_ARGS[@]}"
 log "Strata configuration complete. LXC ${TARGET_LXC_ID} at ${HOST_IP}."
