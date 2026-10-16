@@ -5,6 +5,42 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-10-16
+
+### Fixed (the endpoint was unreachable under its own name)
+
+- `http://hlh-ai-engine-strata.mizertech.net/` returned
+  `403 {"type":"forbidden","message":"Host 'hlh-ai-engine-strata.mizertech.net'
+  is not allowed (DNS rebinding protection)…"}` while
+  `http://192.168.1.15/` worked — so the install looked healthy and every client
+  using the name was locked out. Cause is in `serve/server.py`:
+  `host_names_for()` allows loopback names, the bind address, any IP, and
+  `socket.gethostname()` plus `<hostname>.local`. In this CT `gethostname()` is
+  the **short** name `hlh-ai-engine-strata`; `hostname -f` is the FQDN but is
+  never consulted, and the config had no `allowed_hosts` key.
+- The bootstrap now writes `"allowed_hosts": ["hlh-ai-engine-strata.mizertech.net"]`
+  into `/opt/strata/strata-<model>.json`, in the **same python block as the
+  Phase 1+2 tuning flags** — `setup.sh` rewrites that file on every run, so a
+  hand-edit never survives a rebuild. New `--allowed-hosts LIST` on both scripts
+  (comma-separated, `""` = leave Strata's default, `.mizertech.net` = that domain
+  and everything below, `*` = guard off), forwarded host-side → bootstrap →
+  config, plus the `STRATA_ALLOWED_HOSTS` env override server.py also reads.
+- Bad entries are rejected **before** the 60–90 min rebuild: `allowed_hosts_of()`
+  in server.py raises `ValueError` on an entry it cannot parse and the server
+  then refuses to start at all.
+- New verify gate in both scripts (`[6/6]` / `[7/7]`): after `/health` is up, each
+  allowed name is requested the way a client sends it —
+  `curl -H "Host: <name>" http://127.0.0.1:80/health` — and anything that is not
+  HTTP 200 is reported with the config path. `*` and `.domain` entries are
+  skipped (neither is a Host value to send).
+- Also fixed the stale "engine in `/opt/strata/engine`" summary line in both
+  scripts: `setup.py engine_dir()` names the dir after the toolkit, so on this
+  card it is `/opt/strata/engine-cuda12`.
+- **Not yet applied to the live CT** — it needs `systemctl restart strata`
+  (~6 min: 78 GB of experts + 326 s of expert-slot prefill). Either re-run the
+  deploy, or patch the config in place and restart:
+  `pct exec 115 -- python3 -c 'import json;p="/opt/strata/strata-iq3_s.json";c=json.load(open(p));c["allowed_hosts"]=["hlh-ai-engine-strata.mizertech.net"];json.dump(c,open(p,"w"),indent=1)' && pct exec 115 -- systemctl restart strata`
+
 ## [0.5.1] - 2026-10-16
 
 ### Fixed (SSH into LXC 115 was impossible by any method)

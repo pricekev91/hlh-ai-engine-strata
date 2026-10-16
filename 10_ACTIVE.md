@@ -39,13 +39,18 @@ Active items in progress. These are the current focus areas.
   `http://hlh-ai-engine-strata.mizertech.net/` returns
   `403 {"type":"forbidden","message":"Host 'hlh-ai-engine-strata.mizertech.net' is not allowed"}`
   while `http://192.168.1.15/` works. Cause: `host_names_for()` allows
-  loopback, the bind address, IPs and `socket.gethostname()` — in the CT that is
-  the **short** name `hlh-ai-engine-strata`, not the `hostname -f` FQDN — and
-  the config has no `allowed_hosts` key. Fix: add
-  `"allowed_hosts": ["hlh-ai-engine-strata.mizertech.net"]` to
-  `/opt/strata/strata-iq3_s.json` (setup.sh rewrites that file, so it must also
-  go in the IaC patcher) or `$STRATA_ALLOWED_HOSTS` in the unit. Scope
-  undecided: FQDN only vs `.mizertech.net` vs `*`.
+  loopback, the bind address, IPs and `socket.gethostname()` + `<hostname>.local`
+  — in the CT that is the **short** name `hlh-ai-engine-strata`, not the
+  `hostname -f` FQDN — and the config has no `allowed_hosts` key.
+  **IaC fixed 2026-10-16 (CHANGELOG 0.5.2):** the bootstrap writes
+  `"allowed_hosts": ["hlh-ai-engine-strata.mizertech.net"]` into the config in
+  the same block as the tuning flags (`setup.sh` rewrites that file), both
+  scripts take `--allowed-hosts`, and `[6/6]`/`[7/7]` now probe each name with
+  `curl -H "Host: …" /health` so a greenfield install cannot ship locked-out.
+  **Live CT still pending** — needs a strata restart (~6 min: 78 GB experts +
+  326 s slot prefill):
+  `pct exec 115 -- python3 -c 'import json;p="/opt/strata/strata-iq3_s.json";c=json.load(open(p));c["allowed_hosts"]=["hlh-ai-engine-strata.mizertech.net"];json.dump(c,open(p,"w"),indent=1)' && pct exec 115 -- systemctl restart strata`
+  Verify: `curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: hlh-ai-engine-strata.mizertech.net' http://192.168.1.15/health` → 200.
 - [x] Engine pin bumped 0.1.41 -> **0.1.43** (`7695859aa13a`) in
   `configure-hlh-ai-engine-strata.sh`. Volta sm_70 path confirmed still present
   in 0.1.43. Note `STRATA_ROUTE_TAIL_SKIP=7` is now on by default and changes

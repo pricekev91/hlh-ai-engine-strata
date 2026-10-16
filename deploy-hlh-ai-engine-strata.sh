@@ -8,7 +8,7 @@ usage() {
 	cat <<'EOF'
 Usage:
 	./deploy-hlh-ai-engine-strata.sh [--skip-host-driver] [--keep-111] [--no-bootstrap] [--yes] [--model M]
-	                                 [--vision gpu|cpu|no] [--vision-tokens N]
+	                                 [--vision gpu|cpu|no] [--vision-tokens N] [--allowed-hosts LIST]
 
 Strata path (Qwen3.8-Flash-Next IQ3_S/IQ3_XXS on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	1) Verify host NVIDIA 580.65.06 (R580, last for Volta GV100 cc 7.0) + V100 present
@@ -51,6 +51,12 @@ NOTES:
 	  (sshd_config.d/60-root-password.conf), so ssh root@192.168.1.15 works with the
 	  CT root password (set it: pct exec 115 -- passwd root). The always-available
 	  path is ssh root@192.168.1.10 (prox01) + pct exec 115 -- <cmd>.
+	- Host allow-list: Strata 403s any Host: header its DNS-rebinding guard does not
+	  recognise. Loopback, the bind address, the CT IP and the container's SHORT
+	  hostname always pass; the FQDN does not, so --allowed-hosts
+	  (default hlh-ai-engine-strata.mizertech.net) is written into the config's
+	  allowed_hosts by the bootstrap. Pass "" for Strata's default, ".mizertech.net"
+	  for the whole domain, or "*" to switch the guard off.
 EOF
 }
 
@@ -111,6 +117,13 @@ VISION_MODE="${VISION_MODE:-gpu}"
 # default (1024 on gpu, 300 on cpu). Lower it if the encoder does not fit the
 # card beside the 128K KV + expert cache.
 VISION_TOKENS="${VISION_TOKENS:-}"
+# Host names Strata's DNS-rebinding guard accepts in the Host: header, forwarded
+# to the bootstrap as --allowed-hosts. Without the FQDN here, a rebuilt CT serves
+# http://192.168.1.15/ fine and 403s http://hlh-ai-engine-strata.mizertech.net/
+# (host_names_for() allows loopback, the bind address, IPs and gethostname(),
+# which in the CT is the SHORT name only). Comma-separated; "" = leave setup's
+# default. Accepts .domain (suffix) and * (check off).
+ALLOWED_HOSTS="${ALLOWED_HOSTS:-hlh-ai-engine-strata.mizertech.net}"
 # RAM sizing (IQ3_S/IQ3_XXS, --resident-experts low-RAM mode; validated live 2026-10-10):
 # Strata pins ~26.7 GiB of experts page-locked in RAM (the complement of the GPU
 # cache) + ~2.7 GiB runtime. The rest of the allocation is page cache for the
@@ -143,6 +156,7 @@ while [[ $# -gt 0 ]]; do
 		--model) MODEL_QUANT="$2"; shift 2 ;;
 		--vision) VISION_MODE="$2"; shift 2 ;;
 		--vision-tokens) VISION_TOKENS="$2"; shift 2 ;;
+		--allowed-hosts) ALLOWED_HOSTS="$2"; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "ERROR: Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
@@ -158,6 +172,27 @@ case "$VISION_MODE" in
 esac
 if [ -n "$VISION_TOKENS" ] && ! [[ "$VISION_TOKENS" =~ ^[0-9]+$ ]]; then
 	echo "ERROR: --vision-tokens takes a number of tokens, e.g. 512 (got: $VISION_TOKENS)" >&2; exit 1
+fi
+# Same check the bootstrap makes, but here: a bad entry makes server.py raise
+# ValueError and refuse to start, and finding that out after a 60-90 min rebuild
+# is the worst possible time.
+if [ -n "$ALLOWED_HOSTS" ]; then
+	if [[ "$ALLOWED_HOSTS" =~ [[:space:]] ]]; then
+		echo "ERROR: --allowed-hosts is a comma-separated list with no spaces (got: $ALLOWED_HOSTS)" >&2; exit 1
+	fi
+	_OLDIFS="$IFS"; IFS=,; read -r -a _AH <<< "$ALLOWED_HOSTS"; IFS="$_OLDIFS"
+	for _h in "${_AH[@]}"; do
+		if [ -z "$_h" ]; then
+			IFS="$_OLDIFS"
+			echo "ERROR: --allowed-hosts has an empty entry (got: $ALLOWED_HOSTS)" >&2; exit 1
+		fi
+		if [ "$_h" = "*" ]; then continue; fi
+		if [[ ! "$_h" =~ ^\.?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+			IFS="$_OLDIFS"
+			echo "ERROR: --allowed-hosts entry '$_h' is not a host name (bare name, .domain for a suffix, or * for any Host)" >&2; exit 1
+		fi
+	done
+	IFS="$_OLDIFS"
 fi
 
 # Built after the option parsing on purpose: --model/--vision must show up in the
@@ -445,6 +480,10 @@ else
 		BOOT_ARGS+=(--vision-tokens "$VISION_TOKENS")
 		echo "      + --vision-tokens ${VISION_TOKENS} (max tokens per picture)."
 	fi
+	if [ -n "$ALLOWED_HOSTS" ]; then
+		BOOT_ARGS+=(--allowed-hosts "$ALLOWED_HOSTS")
+		echo "      + allowed_hosts: ${ALLOWED_HOSTS} (otherwise the FQDN 403s while the IP works)."
+	fi
 	pct exec "${LXC_ID}" -- bash /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh "${BOOT_ARGS[@]}"
 fi
 
@@ -474,11 +513,29 @@ if [[ "$NO_BOOTSTRAP" != "true" ]]; then
 				echo "WARNING: --vision ${VISION_MODE} but /health does not report images=true - images will be refused. Check the encoder start in /opt/strata/strata-*.log (VRAM: the GPU encoder wants ~1.2 GB beside the 128K KV)." >&2 ;;
 		esac
 	fi
+	# Host gate: the rebinding guard 403s any Host: it does not know, and the CT's
+	# IP always passes - so a rebuild looks perfectly healthy here while every
+	# client that uses the FQDN is locked out. Ask the way a client does. Skipped
+	# for "*" and ".domain" entries (neither is a Host value to send).
+	if [ -n "$ALLOWED_HOSTS" ]; then
+		_OLDIFS="$IFS"; IFS=,; read -r -a _HOSTS <<< "$ALLOWED_HOSTS"; IFS="$_OLDIFS"
+		for _h in "${_HOSTS[@]}"; do
+			case "$_h" in "*"|.*) continue ;; esac
+			_code="$(pct exec "${LXC_ID}" -- curl -s -o /dev/null -w '%{http_code}' -m 5 -H "Host: $_h" http://127.0.0.1:80/health 2>/dev/null || echo 000)"
+			case "$_code" in
+				*200*) echo "  Host OK       : $_h accepted (HTTP 200)" ;;
+				*) echo "WARNING: Host: $_h -> HTTP ${_code:-000} - Strata's DNS-rebinding guard is refusing it. Check allowed_hosts: pct exec ${LXC_ID} -- cat /opt/strata/strata-*.json" >&2 ;;
+			esac
+		done
+	fi
 fi
 
 echo ""
 echo "Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) at ${LXC_IP_CONFIG%%/*}."
 echo "  Strata web UI + API : http://192.168.1.15:80   (OpenAI /v1, Anthropic /v1/messages)"
+if [ -n "$ALLOWED_HOSTS" ]; then
+	echo "                      by name: http://<allowed host>:80 - allowed_hosts: ${ALLOWED_HOSTS}"
+fi
 echo "  Model shards (SSD)  : ${MODEL_SSD_HOST_DIR} (${SSD_DATASET}) <-> ${MODEL_SSD_LXC_DIR} (LXC)"
 echo "  Model packs         : ${MODEL_HOST_DIR}/strata (host) <-> ${MODEL_LXC_DIR}/strata (LXC) on ${POOL}"
 echo "  Image encoder       : vision ${VISION_MODE} (mmproj-Qwen3.8-Flash-Next-BF16.gguf in ${MODEL_LXC_DIR}/strata/models, helper /opt/strata/engine-cuda12/strata-vision)"

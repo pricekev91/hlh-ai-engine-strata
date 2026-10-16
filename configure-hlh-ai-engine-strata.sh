@@ -55,6 +55,13 @@ Options:
 	--vision-tokens N  most tokens one picture becomes (setup default: 1024 on
 	               gpu, 300 on cpu). Lower it if the encoder does not fit
 	               beside the 128K KV + expert cache.
+	--allowed-hosts LIST  comma-separated Host names the server accepts
+	               (default: hlh-ai-engine-strata.mizertech.net). Strata's
+	               DNS-rebinding guard 403s any Host: header it does not know;
+	               loopback, the bind address, IPs and the container's short
+	               hostname always pass, the FQDN does not. Accepts .example.com
+	               (that name and everything below) and * (check off). Pass "" to
+	               leave setup.sh's default (no allowed_hosts key).
 
 Host side (default): pushes this script into LXC and runs it with --bootstrap-inside.
 --bootstrap-inside: run the bootstrap directly inside the LXC (called by the deploy
@@ -130,6 +137,17 @@ MMPROJ_NAME="mmproj-Qwen3.8-Flash-Next-BF16.gguf"   # 907,543,008 B, ISTA-DASLab
 STRATA_PORT="80"
 STRATA_HOST="0.0.0.0"
 STRATA_GPU="0"
+# DNS-rebinding guard (serve/server.py host_names_for/allowed_hosts_of): every
+# request's Host: header must be loopback, the bind address, an IP,
+# socket.gethostname() or one of allowed_hosts. In this CT gethostname() is the
+# SHORT name (hlh-ai-engine-strata), so the FQDN clients and the README actually
+# use (hostname -f = hlh-ai-engine-strata.mizertech.net) was refused:
+# 403 {"type":"forbidden","message":"Host '...' is not allowed"} while
+# http://192.168.1.15/ worked. Comma-separated; "" = leave setup.sh's default
+# (no allowed_hosts key). server.py also accepts "*" (check off) and
+# ".example.com" (that name plus everything below it), and strips a scheme,
+# port or path from an entry.
+STRATA_ALLOWED_HOSTS="${STRATA_ALLOWED_HOSTS:-hlh-ai-engine-strata.mizertech.net}"
 
 BOOTSTRAP_INSIDE=false
 HOST_IP="$LXC_IP"
@@ -143,6 +161,7 @@ while [[ $# -gt 0 ]]; do
 		--gguf-dir) GGUF_DIR="$2"; shift 2 ;;
 		--vision) STRATA_VISION="$2"; shift 2 ;;
 		--vision-tokens) STRATA_VISION_TOKENS="$2"; shift 2 ;;
+		--allowed-hosts) STRATA_ALLOWED_HOSTS="$2"; shift 2 ;;
 		--bootstrap-inside) BOOTSTRAP_INSIDE=true; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "ERROR: Unknown option: $1" >&2; usage; exit 1 ;;
@@ -155,6 +174,27 @@ case "$STRATA_VISION" in
 esac
 if [ -n "$STRATA_VISION_TOKENS" ] && ! [[ "$STRATA_VISION_TOKENS" =~ ^[0-9]+$ ]]; then
 	echo "ERROR: --vision-tokens takes a number of tokens, e.g. 768 (got: $STRATA_VISION_TOKENS)" >&2; exit 1
+fi
+# Validate the Host allow-list here, not 60 minutes later: allowed_hosts_of() in
+# server.py raises ValueError on a bad entry, and the server then refuses to
+# start at all.
+if [ -n "$STRATA_ALLOWED_HOSTS" ]; then
+	if [[ "$STRATA_ALLOWED_HOSTS" =~ [[:space:]] ]]; then
+		echo "ERROR: --allowed-hosts is a comma-separated list with no spaces (got: $STRATA_ALLOWED_HOSTS)" >&2; exit 1
+	fi
+	_OLDIFS="$IFS"; IFS=,; read -r -a _AH <<< "$STRATA_ALLOWED_HOSTS"; IFS="$_OLDIFS"
+	for _h in "${_AH[@]}"; do
+		if [ -z "$_h" ]; then
+			IFS="$_OLDIFS"
+			echo "ERROR: --allowed-hosts has an empty entry (got: $STRATA_ALLOWED_HOSTS)" >&2; exit 1
+		fi
+		if [ "$_h" = "*" ]; then continue; fi
+		if [[ ! "$_h" =~ ^\.?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+			IFS="$_OLDIFS"
+			echo "ERROR: --allowed-hosts entry '$_h' is not a host name (bare name, .domain for a suffix, or * for any Host)" >&2; exit 1
+		fi
+	done
+	IFS="$_OLDIFS"
 fi
 VISION_LABEL="vision off"
 if [ "$STRATA_VISION" = "gpu" ]; then VISION_LABEL="vision on, GPU encoder"; fi
@@ -462,9 +502,9 @@ SSHEOF
 	#                             8192: CT is 57 GB with ~29.3 pinned + runtime;
 	#                             8 GB would squeeze the expert page cache.
 	log "  Applying Phase 1+2 tuning flags to $CFG_JSON..."
-	"$STRATA_DIR/.venv/bin/python" - "$CFG_JSON" "$PROFILE_PATH" <<'PYEOF'
+	"$STRATA_DIR/.venv/bin/python" - "$CFG_JSON" "$PROFILE_PATH" "$STRATA_ALLOWED_HOSTS" <<'PYEOF'
 import json, sys
-p, profile = sys.argv[1], sys.argv[2]
+p, profile, hosts = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = json.load(open(p))
 a = cfg["args"]
 def set_pair(flag, val):
@@ -495,9 +535,22 @@ set_pair("--conversation-cache-mib", "4096")
 # session dies at ~115k instead of using the window. Clamping max_tokens to the
 # room left turns that 400 into a short completion.
 cfg["fit_max_tokens"] = True
+# allowed_hosts: serve/server.py refuses any request whose Host: header it does
+# not recognise (DNS-rebinding guard). host_names_for() allows loopback, the bind
+# address, IPs and socket.gethostname() - in this CT that is the SHORT name, so
+# the FQDN clients actually use dies with 403 forbidden unless it is listed here.
+# Patched in the same place as the tuning flags because setup.sh rewrites this
+# file on every run, so an edit made by hand does not survive a rebuild.
+if hosts.strip():
+    cfg["allowed_hosts"] = [h.strip().lower() for h in hosts.split(",") if h.strip()]
 json.dump(cfg, open(p, "w"), indent=1)
 PYEOF
 	log "  Phase 1+2 flags: $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['args']))" "$CFG_JSON" 2>/dev/null || echo 'see config')"
+	if [ -n "$STRATA_ALLOWED_HOSTS" ]; then
+		log "  allowed_hosts: $STRATA_ALLOWED_HOSTS (loopback, the bind address, IPs and $(hostname -s) already pass the guard)"
+	else
+		log "  allowed_hosts: not set - only loopback, the bind address, IPs and $(hostname -s) will be accepted"
+	fi
 
 	# --- Vision: verify setup actually wired the encoder ---
 	# A silent text-only fallback is what bit this board before: without the encoder
@@ -616,6 +669,23 @@ UNITEOF
 				log "  WARNING: vision=${STRATA_VISION} requested but /health does not report images=true - images will be refused. Check the encoder start in ${STRATA_DIR}/strata-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]').log (VRAM: the encoder wants ~1.2 GB beside the 128K KV)." ;;
 		esac
 	fi
+	# Host gate: "the endpoint works" and "the endpoint works under its name" are
+	# different questions - the rebinding guard 403s any Host: it does not know,
+	# and the CT's IP always passes, so a greenfield install can look healthy while
+	# every client that uses the FQDN is locked out. Ask the way a client does.
+	# Skipped for "*" and ".domain" entries: neither is a Host value to send.
+	if [ "$READY" = "1" ] && [ -n "$STRATA_ALLOWED_HOSTS" ]; then
+		_OLDIFS="$IFS"; IFS=,; read -r -a _HOSTS <<< "$STRATA_ALLOWED_HOSTS"; IFS="$_OLDIFS"
+		for _h in "${_HOSTS[@]}"; do
+			case "$_h" in "*"|.*) continue ;; esac
+			_code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 -H "Host: $_h" "http://127.0.0.1:${STRATA_PORT}/health" 2>/dev/null || echo 000)"
+			if [ "$_code" = "200" ]; then
+				log "  Host OK: $_h accepted (HTTP 200)"
+			else
+				log "  WARNING: Host: $_h -> HTTP $_code - the DNS-rebinding guard is refusing it. allowed_hosts in $CFG_JSON is $(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('allowed_hosts','<unset>'))" "$CFG_JSON" 2>/dev/null || echo '?')"
+			fi
+		done
+	fi
 	echo ""
 	echo "=============================================================="
 	echo "  Strata bootstrap COMPLETE - LXC 115 (hlh-ai-engine-strata)"
@@ -623,16 +693,22 @@ UNITEOF
 	nvidia-smi 2>&1 | head -15 || true
 	echo ""
 	echo "  Strata web UI + API : http://${LXC_IP}:${STRATA_PORT}  (OpenAI /v1, Anthropic /v1/messages)"
+	if [ -n "$STRATA_ALLOWED_HOSTS" ]; then
+		echo "                      also http://<allowed host>:${STRATA_PORT} - allowed_hosts: ${STRATA_ALLOWED_HOSTS}"
+	fi
 	echo "  Model               : Qwen3.8-Flash-Next ${MODEL_NAME} (${STRATA_CONTEXT} ctx, ${STRATA_KV} KV, ${VISION_LABEL})"
 	echo "  Model shards        : ${GGUF_DIR} (SSD bind mp1, host rpool/strata-models) - no download"
 	echo "  Model packs         : ${STRATA_MODEL_DIR} (shared host mount, pack output)"
-	echo "  Engine              : ${STRATA_DIR}/engine (sm_70 EXPERIMENTAL, CUDA ${CUDA_MAJOR})"
+	echo "  Engine              : ${STRATA_DIR}/engine-cuda12 (sm_70 EXPERIMENTAL, CUDA ${CUDA_MAJOR} - setup.py names the dir after the toolkit)"
 	echo "  Service             : systemctl status strata / journalctl -u strata -f"
 	echo ""
 	echo "  Verify:"
 	echo "    pct exec 115 -- nvidia-smi -L"
 	echo "    curl -s http://${LXC_IP}:${STRATA_PORT}/health"
 	echo "    curl -s http://${LXC_IP}:${STRATA_PORT}/v1/models"
+	if [ -n "$STRATA_ALLOWED_HOSTS" ]; then
+		echo "    by name (Host allow-list): curl -s -o /dev/null -w '%{http_code}\\n' -H 'Host: ${STRATA_ALLOWED_HOSTS%%,*}' http://127.0.0.1:${STRATA_PORT}/health   (want 200, 403 = refused)"
+	fi
 	if [ "$STRATA_VISION" != "no" ]; then
 		echo "    images  : curl -s http://${LXC_IP}:${STRATA_PORT}/health | grep -o '\"images\": *[a-z]*'   (want true)"
 		echo "            then one real picture through /v1/chat/completions (an image_url part);"
@@ -682,6 +758,9 @@ if [ -n "$GGUF_DIR" ]; then
 fi
 if [ -n "$STRATA_VISION_TOKENS" ]; then
 	INNER_ARGS+=(--vision-tokens "$STRATA_VISION_TOKENS")
+fi
+if [ -n "$STRATA_ALLOWED_HOSTS" ]; then
+	INNER_ARGS+=(--allowed-hosts "$STRATA_ALLOWED_HOSTS")
 fi
 pct exec "${TARGET_LXC_ID}" -- bash /root/strata-bootstrap/configure-hlh-ai-engine-strata.sh "${INNER_ARGS[@]}"
 log "Strata configuration complete. LXC ${TARGET_LXC_ID} at ${HOST_IP}."

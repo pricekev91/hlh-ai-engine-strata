@@ -183,10 +183,13 @@ API key: none by default — same as the old llama.cpp setup (LAN-only trust).
 Pass `--api-key` to Strata later if that changes.
 
 Host-header guard: Strata rejects a `Host:` it does not recognise
-(DNS-rebinding protection). Loopback, the bind address, the container IP and
-`socket.gethostname()` (the *short* name) pass; the FQDN does not unless it is
-listed in `allowed_hosts` in `/opt/strata/strata-<model>.json` or in
-`$STRATA_ALLOWED_HOSTS`.
+(DNS-rebinding protection). Loopback, the bind address, any IP, and
+`socket.gethostname()` plus `<hostname>.local` pass — in this CT that is the
+*short* name only. The FQDN does not, so the bootstrap writes
+`"allowed_hosts": ["hlh-ai-engine-strata.mizertech.net"]` into
+`/opt/strata/strata-<model>.json` (since 0.5.2; `--allowed-hosts` to change it,
+`""` to leave Strata's default, `.mizertech.net` for the whole domain, `*` to
+switch the guard off).
 
 ### Shell access
 

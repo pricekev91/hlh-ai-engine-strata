@@ -59,14 +59,13 @@ in the codebase.
   before the bootstrap runs, would make the direct path work on a greenfield
   rebuild with no manual step — and would let `PermitRootLogin` go back to
   `prohibit-password`.
-- `allowed_hosts`: reaching the endpoint by FQDN
-  (`hlh-ai-engine-strata.mizertech.net`) is refused by Strata's DNS-rebinding
-  guard — `host_names_for()` allows loopback, the bind address, IPs and
-  `socket.gethostname()`, which in the CT is the *short* name only. Needs
-  `"allowed_hosts": ["hlh-ai-engine-strata.mizertech.net"]` in
-  `/opt/strata/strata-<model>.json` (setup.sh rewrites that file, so it belongs
-  in the IaC patcher next to the tuning flags) or `$STRATA_ALLOWED_HOSTS` in the
-  unit. Deciding the scope: FQDN only vs. `.mizertech.net` vs. `*`.
+- `allowed_hosts` is now IaC-managed (0.5.2, default
+  `hlh-ai-engine-strata.mizertech.net`). Two follow-ups: apply it to the live CT
+  (needs the ~6 min strata restart, command in 10_ACTIVE), and revisit the scope
+  if a reverse proxy or a second name ever fronts the endpoint —
+  `--allowed-hosts .mizertech.net` widens it to the domain, `*` switches the
+  guard off entirely (defensible only while the box stays LAN-only).
+  `cors_origins` is the matching knob if a browser origin ever needs it.
 
 ## Ops
 
