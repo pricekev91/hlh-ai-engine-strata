@@ -182,6 +182,23 @@ Useful flags:
 API key: none by default — same as the old llama.cpp setup (LAN-only trust).
 Pass `--api-key` to Strata later if that changes.
 
+Host-header guard: Strata rejects a `Host:` it does not recognise
+(DNS-rebinding protection). Loopback, the bind address, the container IP and
+`socket.gethostname()` (the *short* name) pass; the FQDN does not unless it is
+listed in `allowed_hosts` in `/opt/strata/strata-<model>.json` or in
+`$STRATA_ALLOWED_HOSTS`.
+
+### Shell access
+
+| Path | Notes |
+|---|---|
+| `ssh root@192.168.1.10` (prox01) → `pct exec 115 -- <cmd>` | always available; key auth on prox01 |
+| `ssh root@192.168.1.15` (direct into the CT) | since 0.5.1 — root **password** login (`PermitRootLogin yes`, drop-in `/etc/ssh/sshd_config.d/60-root-password.conf`). Set/change it with `pct exec 115 -- passwd root` |
+
+Before 0.5.1 the direct path could not work by *any* method: the bootstrap
+installed `openssh-server` but no `authorized_keys`, and Ubuntu's default
+`PermitRootLogin prohibit-password` refused root's password.
+
 ## Repository Layout
 
 ```

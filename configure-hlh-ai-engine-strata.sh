@@ -292,6 +292,43 @@ CUDAEOF
 		ldconfig 2>/dev/null || true
 	fi
 
+	# --- SSH: let root in with a password (openssh-server was installed above) ---
+	# Ubuntu's sshd default is PermitRootLogin prohibit-password, so root's password
+	# is refused even though PasswordAuthentication is yes - and the bootstrap never
+	# installs an authorized_keys, which left a rebuilt CT with NO working SSH path
+	# at all (verified live 2026-10-16: "Permission denied (publickey,password)",
+	# /root/.ssh empty, PermitRootLogin without-password). The documented path was
+	# always prox01 + `pct exec 115`, but `ssh root@192.168.1.15` is what the
+	# runbooks and muscle memory expect. Exposure is the LAN only (no port-forward,
+	# no public name) - the same trust boundary as the :80 endpoint.
+	# A drop-in, not an edit of sshd_config: sshd_config.d/*.conf is Included at the
+	# top of the main file (line 12) so it wins, and apt keeps owning sshd_config.
+	ssh-keygen -A >/dev/null 2>&1 || true     # host keys, if the template has none yet
+	cat > /etc/ssh/sshd_config.d/60-root-password.conf <<SSHEOF
+# Managed by configure-hlh-ai-engine-strata.sh - do not edit in place.
+PermitRootLogin yes
+PasswordAuthentication yes
+SSHEOF
+	chmod 0644 /etc/ssh/sshd_config.d/60-root-password.conf
+	SSHD_T_ERR=""
+	if ! SSHD_T_ERR="$(sshd -t 2>&1)"; then
+		printf '%s\n' "$SSHD_T_ERR" | head -3
+		rm -f /etc/ssh/sshd_config.d/60-root-password.conf
+		log "  WARNING: sshd -t failed - dropped the sshd_config.d drop-in, SSH stays at Ubuntu defaults (root key-only)"
+	elif systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null; then
+		if sshd -T 2>/dev/null | grep -qi '^permitrootlogin yes'; then
+			log "  - SSH: PermitRootLogin yes + PasswordAuthentication yes (drop-in sshd_config.d/60-root-password.conf)"
+			case "$(passwd -S root 2>/dev/null | awk '{print $2}')" in
+				P) log "      root has a password set - ssh root@${LXC_IP} works now" ;;
+				*) log "      root has NO usable password (Ubuntu template default) - set one: pct exec ${TARGET_LXC_ID} -- passwd root" ;;
+			esac
+		else
+			log "  WARNING: sshd restarted but PermitRootLogin is not 'yes' - check /etc/ssh/sshd_config.d/ and sshd -T"
+		fi
+	else
+		log "  WARNING: could not restart ssh.service - the drop-in is in place but needs: pct exec ${TARGET_LXC_ID} -- systemctl restart ssh"
+	fi
+
 	# --- 2/6 Verify GPU + nvcc ---
 	log "[2/6] Verifying GPU + CUDA toolkit inside container..."
 	[ -c /dev/nvidia0 ] || fatal "/dev/nvidia0 missing (GPU passthrough not wired? check deploy [5/7])"

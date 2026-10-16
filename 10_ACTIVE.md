@@ -4,32 +4,48 @@ Active items in progress. These are the current focus areas.
 
 ## Active (V100 LXC 115 Strata sm_70) — rebuild on Strata 0.1.43
 
-- [ ] **Nuke and rebuild LXC 115 on Strata 0.1.43** — IaC is ready (CHANGELOG
-  0.4.2 + 0.5.0). Run on prox01 from the repo checkout:
-  `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`
-  (host driver 580.65.06 is already installed and working, so skip that step).
-  Expect ~55–110 min offline: CUDA 12.8 install + engine compile 10–40 min +
-  **image encoder: mmproj 0.9 GB download + `strata-vision` compile 10–20 min
-  (new in 0.5.0, `--vision gpu` is now the default)** + pack from the local SSD
-  shards + cold model load.
-  What the IaC now handles by itself: 0.1.43 pin, Phase 1+2 tuning flags, the
-  tuned `strata.service`, and the learned expert profile — which now lives on
-  the model dataset (`/srv/ai/models/strata/data/iq3_s/expert-profile.bin`)
-  so it survives `pct destroy` without the snapshot path (CHANGELOG 0.4.3).
-  Verify after: `pct exec 115 -- systemctl is-active strata`,
-  `curl -s localhost/health` (model `qwen3.8-flash-next-iq3_s`),
-  **`curl -s localhost/health | grep -o '"images": *[a-z]*'` = `true`** and one
-  real picture through `/v1/chat/completions` (CHANGELOG 0.5.0 — **no upstream
-  sm_70 vision report exists**, so this is the first measurement),
-  `ls -l /srv/ai/models/strata/data/iq3_s/expert-profile.bin` (non-zero, and
-  growing every 10 min), and in `/opt/strata/strata-iq3_s.log` that the
-  expert cache starts near **12,598 slots** with hit rate **~94–95%** (a
-  ~87% start means the profile did not load). Expect the encoder to take ~1.2 GB
-  of the card, i.e. **~1,000 fewer slots** than the text-only baseline — if the
-  hit rate or decode drops more than ~5%, re-run with `--vision-tokens 512` or
-  `--vision cpu` (README "Vision (images)").
+- [x] **Nuke and rebuild LXC 115 on Strata 0.1.43 + vision** — DONE 2026-10-16
+  (~01:25 CT boot, strata.service active 01:48). Ran
+  `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes` from the repo
+  checkout on prox01.
+  Verified after: `strata.service` active, `/health` =
+  `qwen3.8-flash-next-iq3_s`, **`"images": true`**, `strata-vision` started and
+  `warmed up at 1024 image tokens in 1.5 s` (helper
+  `/opt/strata/engine-cuda12/strata-vision`, mmproj in
+  `/srv/ai/models/strata/models`), expert profile loaded from the dataset
+  (`24576 ranked pairs`, `pre-filled 11920 of 11920 slots from the profile in
+  326.9 s; slot 0 verified`), and the Phase 1+2 tuning flags are all present in
+  the `engine started:` line.
+  **First Volta vision measurement (upstream has no sm_70 vision report):**
+  expert cache **11,920 slots / 22.55 GiB** vs the 12,598-slot text-only
+  baseline — **678 slots (−5.4 %)** lost to the encoder + `--vram-reserve-mib
+  700`; card now at 32,282/32,768 MiB. Hit rate 91.8–94.8 % (mostly 92–93 %)
+  vs 94–95 % baseline; decode samples 39.1–54.7 tok/s. Inside the ±5 % band, so
+  `--vision gpu` stays the default — no `--vision-tokens`/`--vision cpu`
+  fallback needed.
   Rollback if 0.1.43 misbehaves: `STRATA_COMMIT=fb58e0dbc8399662c0e47c76578c6e878b14f6cf ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`
   Rollback if vision breaks the text path: `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --vision no --yes`
+- [x] **SSH into the CT** — the rebuilt CT had **no working SSH path at all**
+  (`ssh root@192.168.1.15` → `Permission denied (publickey,password)`;
+  `PermitRootLogin without-password` + empty `/root/.ssh`). Fixed live
+  2026-10-16 and in the IaC (0.5.1): drop-in
+  `/etc/ssh/sshd_config.d/60-root-password.conf` → `PermitRootLogin yes` +
+  `PasswordAuthentication yes`, `sshd -t`-gated, `ssh.service` restarted,
+  re-checked with `sshd -T`. Confirmed the password path is reached
+  (`Failed password for root from 192.168.1.81` on a deliberate wrong-password
+  attempt). Root's password is set (`passwd -S root` → `P`) — use it; keys are
+  still not provisioned (BACKLOG).
+- [ ] **FQDN access is blocked by Strata's DNS-rebinding guard** — reaching
+  `http://hlh-ai-engine-strata.mizertech.net/` returns
+  `403 {"type":"forbidden","message":"Host 'hlh-ai-engine-strata.mizertech.net' is not allowed"}`
+  while `http://192.168.1.15/` works. Cause: `host_names_for()` allows
+  loopback, the bind address, IPs and `socket.gethostname()` — in the CT that is
+  the **short** name `hlh-ai-engine-strata`, not the `hostname -f` FQDN — and
+  the config has no `allowed_hosts` key. Fix: add
+  `"allowed_hosts": ["hlh-ai-engine-strata.mizertech.net"]` to
+  `/opt/strata/strata-iq3_s.json` (setup.sh rewrites that file, so it must also
+  go in the IaC patcher) or `$STRATA_ALLOWED_HOSTS` in the unit. Scope
+  undecided: FQDN only vs `.mizertech.net` vs `*`.
 - [x] Engine pin bumped 0.1.41 -> **0.1.43** (`7695859aa13a`) in
   `configure-hlh-ai-engine-strata.sh`. Volta sm_70 path confirmed still present
   in 0.1.43. Note `STRATA_ROUTE_TAIL_SKIP=7` is now on by default and changes

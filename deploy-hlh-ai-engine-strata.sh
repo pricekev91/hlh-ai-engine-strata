@@ -47,6 +47,10 @@ NOTES:
 	  sm_70 (~10-20 min extra). The GPU encoder holds ~1.2 GB of the 32 GB card, so
 	  the expert cache loses ~1,000 slots. --vision cpu keeps every slot and encodes
 	  on the CPU instead; --vision no is the pre-0.5.0 text-only install.
+	- Shell access into the CT: the bootstrap sets PermitRootLogin yes
+	  (sshd_config.d/60-root-password.conf), so ssh root@192.168.1.15 works with the
+	  CT root password (set it: pct exec 115 -- passwd root). The always-available
+	  path is ssh root@192.168.1.10 (prox01) + pct exec 115 -- <cmd>.
 EOF
 }
 
@@ -478,7 +482,8 @@ echo "  Strata web UI + API : http://192.168.1.15:80   (OpenAI /v1, Anthropic /v
 echo "  Model shards (SSD)  : ${MODEL_SSD_HOST_DIR} (${SSD_DATASET}) <-> ${MODEL_SSD_LXC_DIR} (LXC)"
 echo "  Model packs         : ${MODEL_HOST_DIR}/strata (host) <-> ${MODEL_LXC_DIR}/strata (LXC) on ${POOL}"
 echo "  Image encoder       : vision ${VISION_MODE} (mmproj-Qwen3.8-Flash-Next-BF16.gguf in ${MODEL_LXC_DIR}/strata/models, helper /opt/strata/engine-cuda12/strata-vision)"
-echo "  Strata source       : /opt/strata (pinned commit, engine in /opt/strata/engine)"
+echo "  Strata source       : /opt/strata (pinned commit; engine in /opt/strata/engine-cuda12 - setup.py names the dir after the CUDA toolkit, and sm_70 requires 12.x)"
 echo "  V100 freed from     : LXC ${EGPU_LXC_ID} (hlh-ai-engine-egpu, stopped, onboot 0, config intact)"
 echo "  Host driver pinned  : $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"
+echo "  Shell into the CT   : ssh root@${LXC_IP_CONFIG%%/*} (root password; PermitRootLogin yes) - or pct exec ${LXC_ID} from prox01"
 echo "Verify inside LXC: nvidia-smi -L && systemctl status strata && curl -s http://127.0.0.1:80/health"

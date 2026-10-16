@@ -5,6 +5,38 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-10-16
+
+### Fixed (SSH into LXC 115 was impossible by any method)
+
+- **`ssh root@192.168.1.15` could not succeed.** The bootstrap installs
+  `openssh-server` and stops there: Ubuntu's default
+  `PermitRootLogin prohibit-password` refuses root's password (even with
+  `PasswordAuthentication yes`) and no `authorized_keys` is ever installed, so
+  a rebuilt CT offers `publickey,password` and accepts neither —
+  `Permission denied (publickey,password)` with an empty `/root/.ssh`. The only
+  way in was `ssh root@192.168.1.10` + `pct exec 115`.
+- The bootstrap now writes `/etc/ssh/sshd_config.d/60-root-password.conf`
+  (`PermitRootLogin yes` + `PasswordAuthentication yes`). A drop-in, not an edit
+  of `sshd_config`: `sshd_config.d/*.conf` is `Include`d at the top of the main
+  file so it wins, and apt keeps owning `sshd_config`. It runs `ssh-keygen -A`
+  first (a fresh template may ship no host keys, and `sshd -t` then fails),
+  validates with `sshd -t` — on failure the drop-in is removed and the reason
+  printed, never a half-applied sshd change — restarts `ssh.service`, and
+  re-reads the effective value with `sshd -T` instead of trusting the write.
+- It also says out loud when root has no usable password yet
+  (`passwd -S root` != `P`, the Ubuntu template default) and prints the
+  `pct exec 115 -- passwd root` command, so a rebuild does not look like a
+  broken SSH.
+- Applied live on LXC 115 (2026-10-16) and verified: `sshd -T` →
+  `permitrootlogin yes`, and a deliberate wrong-password attempt now reaches the
+  password stage (`pam_unix(sshd:auth): authentication failure` +
+  `Failed password for root from 192.168.1.81`) instead of being refused before
+  it is even tried.
+- Scope: password auth for **root** on a LAN-only box — no port-forward, no
+  public name, the same trust boundary as the unauthenticated `:80` endpoint.
+  Key-based login is still not provisioned (BACKLOG).
+
 ## [0.5.0] - 2026-10-15
 
 ### Added (vision — the engine can read pictures)

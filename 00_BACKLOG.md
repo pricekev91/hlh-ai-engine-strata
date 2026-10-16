@@ -17,15 +17,19 @@ in the codebase.
   re-run setup with `--low-ram on` (32 GB card holds hot experts, RAM the rest).
 - API key: Strata supports `--api-key`; enable if the :80 endpoint ever leaves
   the trusted LAN.
-- **Vision on Volta is untested** (0.5.0 turns `--vision gpu` on by default;
+- **Vision on Volta works** (measured 2026-10-16 on the 0.5.0 rebuild —
   upstream documents vision for Turing+ and never mentions the encoder in
-  `NVIDIA_V100.md` / `OLDER_GPUS.md`). After the first rebuild with the encoder,
-  measure the text cost of the ~1,000 expert slots it takes (baseline: 12,598
-  slots, 94–95 % hit, 41.8–47.5 tok/s decode). If decode drops more than ~5 %:
-  `--vision-tokens 512` → `--vision cpu` → the on-demand encoder
-  (`vram_elastic: true` + `vision.elastic: true`, `elastic_mib` 2048 /
+  `NVIDIA_V100.md` / `OLDER_GPUS.md`, so this is the first sm_70 report).
+  `strata-vision` starts and `warms up at 1024 image tokens in 1.5 s`;
+  `/health` → `images: true`. Cost: expert cache **11,920 slots / 22.55 GiB**
+  vs the 12,598-slot text-only baseline = **678 slots (−5.4 %)** for the
+  encoder + `--vram-reserve-mib 700`; card at 32,282/32,768 MiB. Hit rate
+  91.8–94.8 % (mostly 92–93 %) vs 94–95 %; decode 39.1–54.7 tok/s samples.
+  Inside the ±5 % band → `--vision gpu` stays the default. Escape hatches if it
+  ever gets worse: `--vision-tokens 512` → `--vision cpu` → the on-demand
+  encoder (`vram_elastic: true` + `vision.elastic: true`, `elastic_mib` 2048 /
   `elastic_idle_s` 120 — NVIDIA-only, upstream measured it on an AMD card only).
-  Worth an upstream report either way (works or does not, on cc 7.0).
+  **Worth an upstream report** (works on cc 7.0, with these numbers).
 - mmproj is re-downloaded (0.9 GB from HF) on every greenfield bootstrap; it
   lives in `/srv/ai/models/strata/models` (mp0) so a rebuild that keeps the
   dataset does not re-fetch it. Only seed it onto `rpool/strata-models` if that
@@ -48,6 +52,21 @@ in the codebase.
 - LXC snapshot before model upgrades (Strata data is on the ZFS mount; rootfs
   holds the engine build).
 - Optional: `LimitCPU`/`LimitAS` hardening once usage is characterized.
+- SSH keys: the bootstrap now enables root **password** login (0.5.1), but still
+  installs no `authorized_keys`, so direct `ssh root@192.168.1.15` depends on a
+  password being set in the CT (an Ubuntu template's root starts without one).
+  A `--ssh-key FILE` on the deploy script, pushed into `/root/.ssh/authorized_keys`
+  before the bootstrap runs, would make the direct path work on a greenfield
+  rebuild with no manual step — and would let `PermitRootLogin` go back to
+  `prohibit-password`.
+- `allowed_hosts`: reaching the endpoint by FQDN
+  (`hlh-ai-engine-strata.mizertech.net`) is refused by Strata's DNS-rebinding
+  guard — `host_names_for()` allows loopback, the bind address, IPs and
+  `socket.gethostname()`, which in the CT is the *short* name only. Needs
+  `"allowed_hosts": ["hlh-ai-engine-strata.mizertech.net"]` in
+  `/opt/strata/strata-<model>.json` (setup.sh rewrites that file, so it belongs
+  in the IaC patcher next to the tuning flags) or `$STRATA_ALLOWED_HOSTS` in the
+  unit. Deciding the scope: FQDN only vs. `.mizertech.net` vs. `*`.
 
 ## Ops
 
