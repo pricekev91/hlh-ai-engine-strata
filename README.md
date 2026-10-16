@@ -196,11 +196,13 @@ switch the guard off).
 | Path | Notes |
 |---|---|
 | `ssh root@192.168.1.10` (prox01) → `pct exec 115 -- <cmd>` | always available; key auth on prox01 |
-| `ssh root@192.168.1.15` (direct into the CT) | since 0.5.1 — root **password** login (`PermitRootLogin yes`, drop-in `/etc/ssh/sshd_config.d/60-root-password.conf`). Set/change it with `pct exec 115 -- passwd root` |
+| `ssh root@192.168.1.15` (direct into the CT) | since 0.5.3 the **deploy script sets the root password** (`--root-password PASS`, `LXC_PASSWORD=…`, an interactive prompt, or a generated one printed once) and turns on root **password** login (`PermitRootLogin yes`, drop-in `/etc/ssh/sshd_config.d/99-root-login.conf`) right after `pct start`, before the bootstrap. Change it later with `pct exec 115 -- passwd root` |
 
 Before 0.5.1 the direct path could not work by *any* method: the bootstrap
-installed `openssh-server` but no `authorized_keys`, and Ubuntu's default
-`PermitRootLogin prohibit-password` refused root's password.
+installed `openssh-server` but no `authorized_keys`, Ubuntu's default
+`PermitRootLogin prohibit-password` refused root's password, and the Ubuntu LXC
+template gives root **no password at all**. 0.5.1's drop-in also got itself
+deleted during a rebuild — see [0.5.3].
 
 ## Repository Layout
 

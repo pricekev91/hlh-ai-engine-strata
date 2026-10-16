@@ -343,30 +343,58 @@ CUDAEOF
 	# no public name) - the same trust boundary as the :80 endpoint.
 	# A drop-in, not an edit of sshd_config: sshd_config.d/*.conf is Included at the
 	# top of the main file (line 12) so it wins, and apt keeps owning sshd_config.
+	# Same file name as lab-opskit/create-lxc.sh and hlh-ai-engine-vllm so every
+	# LXC on the LAN is configured the same way.
+	#
+	# Do NOT gate on a bare `sshd -t`. ssh.service has RuntimeDirectory=sshd, so
+	# while the service is stopped /run/sshd does not exist and the test fails for
+	# a reason unrelated to this file. dpkg stops ssh (and ssh.socket) mid-way
+	# through the apt install above - an earlier run deleted a perfectly good
+	# drop-in that way and the CT came back key-only. So: create the runtime dir
+	# first, and if the config still fails, work out whether the drop-in is really
+	# the cause before removing it.
+	SSHD_DROPIN="/etc/ssh/sshd_config.d/99-root-login.conf"
+	rm -f /etc/ssh/sshd_config.d/60-root-password.conf 2>/dev/null || true
 	ssh-keygen -A >/dev/null 2>&1 || true     # host keys, if the template has none yet
-	cat > /etc/ssh/sshd_config.d/60-root-password.conf <<SSHEOF
-# Managed by configure-hlh-ai-engine-strata.sh - do not edit in place.
+	mkdir -p /etc/ssh/sshd_config.d /run/sshd
+	cat > "$SSHD_DROPIN" <<SSHEOF
+# Managed by configure-hlh-ai-engine-strata.sh / deploy-hlh-ai-engine-strata.sh - do not edit in place.
 PermitRootLogin yes
 PasswordAuthentication yes
+KbdInteractiveAuthentication no
+UsePAM yes
 SSHEOF
-	chmod 0644 /etc/ssh/sshd_config.d/60-root-password.conf
-	SSHD_T_ERR=""
-	if ! SSHD_T_ERR="$(sshd -t 2>&1)"; then
-		printf '%s\n' "$SSHD_T_ERR" | head -3
-		rm -f /etc/ssh/sshd_config.d/60-root-password.conf
-		log "  WARNING: sshd -t failed - dropped the sshd_config.d drop-in, SSH stays at Ubuntu defaults (root key-only)"
-	elif systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null; then
+	chmod 0644 "$SSHD_DROPIN"
+	if ! sshd -t >/dev/null 2>&1; then
+		if mv "$SSHD_DROPIN" "${SSHD_DROPIN}.off" 2>/dev/null; then
+			if sshd -t >/dev/null 2>&1; then
+				mv "${SSHD_DROPIN}.off" "$SSHD_DROPIN"
+				rm -f "$SSHD_DROPIN"
+				log "  WARNING: sshd rejects the drop-in - SSH stays at Ubuntu defaults (root key-only)"
+			else
+				mv "${SSHD_DROPIN}.off" "$SSHD_DROPIN"
+				log "  WARNING: sshd -t fails with AND without the drop-in - kept it, but check: pct exec ${TARGET_LXC_ID} -- sshd -t"
+			fi
+		fi
+	fi
+	# dpkg leaves ssh stopped after configuring openssh-server; enable it so the
+	# container is still reachable after a reboot.
+	systemctl enable ssh >/dev/null 2>&1 || true
+	# reset-failed: a previous failed start leaves the unit rate-limited
+	# ("start request repeated too quickly"), and then restart refuses to run.
+	systemctl reset-failed ssh >/dev/null 2>&1 || true
+	if systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null; then
 		if sshd -T 2>/dev/null | grep -qi '^permitrootlogin yes'; then
-			log "  - SSH: PermitRootLogin yes + PasswordAuthentication yes (drop-in sshd_config.d/60-root-password.conf)"
+			log "  - SSH: PermitRootLogin yes + PasswordAuthentication yes (drop-in sshd_config.d/99-root-login.conf)"
 			case "$(passwd -S root 2>/dev/null | awk '{print $2}')" in
 				P) log "      root has a password set - ssh root@${LXC_IP} works now" ;;
-				*) log "      root has NO usable password (Ubuntu template default) - set one: pct exec ${TARGET_LXC_ID} -- passwd root" ;;
+				*) log "      root has NO usable password - set one: deploy with --root-password, or pct exec ${TARGET_LXC_ID} -- passwd root" ;;
 			esac
 		else
-			log "  WARNING: sshd restarted but PermitRootLogin is not 'yes' - check /etc/ssh/sshd_config.d/ and sshd -T"
+			log "  WARNING: sshd restarted but PermitRootLogin is not 'yes' - check ${SSHD_DROPIN} and sshd -T"
 		fi
 	else
-		log "  WARNING: could not restart ssh.service - the drop-in is in place but needs: pct exec ${TARGET_LXC_ID} -- systemctl restart ssh"
+		log "  WARNING: could not (re)start ssh.service - the drop-in is in place but needs: pct exec ${TARGET_LXC_ID} -- systemctl restart ssh"
 	fi
 
 	# --- 2/6 Verify GPU + nvcc ---

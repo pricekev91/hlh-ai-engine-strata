@@ -9,6 +9,7 @@ usage() {
 Usage:
 	./deploy-hlh-ai-engine-strata.sh [--skip-host-driver] [--keep-111] [--no-bootstrap] [--yes] [--model M]
 	                                 [--vision gpu|cpu|no] [--vision-tokens N] [--allowed-hosts LIST]
+	                                 [--root-password PASS]
 
 Strata path (Qwen3.8-Flash-Next IQ3_S/IQ3_XXS on Tesla V100 GV100GL 32GB via OCuLink) - CUDA:
 	1) Verify host NVIDIA 580.65.06 (R580, last for Volta GV100 cc 7.0) + V100 present
@@ -21,7 +22,8 @@ Strata path (Qwen3.8-Flash-Next IQ3_S/IQ3_XXS on Tesla V100 GV100GL 32GB via OCu
 	   IQ3_S GGUF shard pair onto it (from the HDD copy if present), then create
 	   privileged LXC 115 (hlh-ai-engine-strata) at 192.168.1.15 with mp0 + mp1
 	6) Add cgroup + /dev/nvidia* bind-mounts for single GV100 (c5:00.0)
-	7) Start container + push/run Strata bootstrap
+	7) Start container + set root password + root-login sshd drop-in, then run the
+	   Strata bootstrap
 	   (CUDA 12.8 + engine build sm_70 EXPERIMENTAL -DSTRATA_EXPERIMENTAL_SM60=ON
 	    + IQ3_S pack from LOCAL SSD shards, no model download
 	    + image encoder: mmproj-Qwen3.8-Flash-Next-BF16.gguf (0.9 GB download)
@@ -47,10 +49,18 @@ NOTES:
 	  sm_70 (~10-20 min extra). The GPU encoder holds ~1.2 GB of the 32 GB card, so
 	  the expert cache loses ~1,000 slots. --vision cpu keeps every slot and encodes
 	  on the CPU instead; --vision no is the pre-0.5.0 text-only install.
-	- Shell access into the CT: the bootstrap sets PermitRootLogin yes
-	  (sshd_config.d/60-root-password.conf), so ssh root@192.168.1.15 works with the
-	  CT root password (set it: pct exec 115 -- passwd root). The always-available
-	  path is ssh root@192.168.1.10 (prox01) + pct exec 115 -- <cmd>.
+	- Shell access into the CT: the deploy script sets the root password AND turns
+	  on root login right after the container starts (before the bootstrap), so
+	  ssh root@192.168.1.15 works even with --no-bootstrap or a failed bootstrap.
+	  Password comes from --root-password PASS, LXC_PASSWORD=..., an interactive
+	  prompt, or a generated one printed once in the summary (nothing is stored).
+	  sshd gets PermitRootLogin yes via sshd_config.d/99-root-login.conf - the same
+	  drop-in name lab-opskit/create-lxc.sh and hlh-ai-engine-vllm use. Do not gate
+	  that drop-in on a bare `sshd -t`: ssh.service has RuntimeDirectory=sshd, so
+	  while dpkg has ssh stopped mid-install /run/sshd is missing and the test fails
+	  on something unrelated to the file - that silently deleted the drop-in once and
+	  the CT came back key-only ("Permission denied (publickey,password)").
+	  The always-available path is ssh root@192.168.1.10 (prox01) + pct exec 115 -- <cmd>.
 	- Host allow-list: Strata 403s any Host: header its DNS-rebinding guard does not
 	  recognise. Loopback, the bind address, the CT IP and the container's SHORT
 	  hostname always pass; the FQDN does not, so --allowed-hosts
@@ -124,6 +134,15 @@ VISION_TOKENS="${VISION_TOKENS:-}"
 # which in the CT is the SHORT name only). Comma-separated; "" = leave setup's
 # default. Accepts .domain (suffix) and * (check off).
 ALLOWED_HOSTS="${ALLOWED_HOSTS:-hlh-ai-engine-strata.mizertech.net}"
+# Root password for the CT, applied right after pct start (before the bootstrap).
+# Ubuntu's LXC template gives root no password at all, so a rebuilt box is not
+# reachable over SSH even with PermitRootLogin yes. Same knob as lab-opskit and
+# hlh-ai-engine-vllm (LXC_PASSWORD env). Empty + interactive = prompt, empty +
+# non-interactive = generate and print once.
+LXC_PASSWORD="${LXC_PASSWORD:-}"
+LXC_PASSWORD_SOURCE=""      # set by resolve_root_password(): flag | env | prompt | generated
+LXC_PASSWORD_SET=false      # resolve_root_password() sets this once a password exists
+LXC_PASSWORD_DECLINED=false # an interactive "no" must not be answered with a generated one
 # RAM sizing (IQ3_S/IQ3_XXS, --resident-experts low-RAM mode; validated live 2026-10-10):
 # Strata pins ~26.7 GiB of experts page-locked in RAM (the complement of the GPU
 # cache) + ~2.7 GiB runtime. The rest of the allocation is page cache for the
@@ -157,6 +176,7 @@ while [[ $# -gt 0 ]]; do
 		--vision) VISION_MODE="$2"; shift 2 ;;
 		--vision-tokens) VISION_TOKENS="$2"; shift 2 ;;
 		--allowed-hosts) ALLOWED_HOSTS="$2"; shift 2 ;;
+		--root-password) LXC_PASSWORD="$2"; LXC_PASSWORD_SOURCE="--root-password"; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "ERROR: Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
@@ -194,6 +214,121 @@ if [ -n "$ALLOWED_HOSTS" ]; then
 	done
 	IFS="$_OLDIFS"
 fi
+
+# --- Root SSH into the CT (password + PermitRootLogin) -----------------------
+# Ubuntu's LXC template gives root NO password, and sshd defaults to
+# PermitRootLogin prohibit-password with no authorized_keys - so a rebuilt CT has
+# no SSH path at all until both are fixed. Same knobs as lab-opskit/create-lxc.sh
+# and hlh-ai-engine-vllm (LXC_PASSWORD env, chpasswd through a pushed file).
+resolve_root_password() {
+	if [ -n "$LXC_PASSWORD" ]; then
+		[ -n "$LXC_PASSWORD_SOURCE" ] || LXC_PASSWORD_SOURCE="LXC_PASSWORD env"
+		LXC_PASSWORD_SET=true
+		return 0
+	fi
+	if [[ -t 0 ]] && [[ "$ASSUME_YES" != "true" ]]; then
+		local _ask _pw _pw2
+		echo ""
+		echo "The Ubuntu template gives root no password, so ssh root@${LXC_IP_CONFIG%%/*} is"
+		echo "refused until one is set (PermitRootLogin is handled for you either way)."
+		printf '%s' "Set a root password for LXC ${LXC_ID} now? [Y/n] "
+		read -r _ask
+		case "$_ask" in
+			[nN]*) echo "  Skipping - set one later: pct exec ${LXC_ID} -- passwd root"
+				LXC_PASSWORD_DECLINED=true ;;
+			*)
+				read -rsp "  New root password for LXC ${LXC_ID}: " _pw; echo
+				if [ -z "$_pw" ]; then
+					echo "  Empty password - skipping. Set one later: pct exec ${LXC_ID} -- passwd root"
+					LXC_PASSWORD_DECLINED=true
+				else
+					read -rsp "  Confirm root password: " _pw2; echo
+					if [ "$_pw" != "$_pw2" ]; then
+						echo "  Passwords do not match - skipping. Set one later: pct exec ${LXC_ID} -- passwd root" >&2
+						LXC_PASSWORD_DECLINED=true
+					else
+						LXC_PASSWORD="$_pw"; LXC_PASSWORD_SOURCE="prompt"; LXC_PASSWORD_SET=true
+					fi
+				fi
+				;;
+		esac
+		unset _ask _pw _pw2
+	fi
+	# Only invent a password when nobody had the chance to say no. Declining out
+	# loud must not be answered with a random one the operator never sees.
+	if [[ "$LXC_PASSWORD_SET" != "true" && "$LXC_PASSWORD_DECLINED" != "true" ]]; then
+		# --yes / cron / piped stdin: no prompt is possible, so make one up and show
+		# it exactly once. Nothing is written to disk or to the LXC config.
+		LXC_PASSWORD="$(openssl rand -hex 12 2>/dev/null || true)"
+		[ -n "$LXC_PASSWORD" ] || LXC_PASSWORD="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+		LXC_PASSWORD_SOURCE="generated"
+		LXC_PASSWORD_SET=true
+	fi
+}
+
+# Applied right after pct start and BEFORE the bootstrap: a bootstrap that dies
+# half-way (compile, download, pack) must never be the reason the box is
+# unreachable. Idempotent, so re-running the deploy is fine.
+apply_root_ssh() {
+	local _ip="${LXC_IP_CONFIG%%/*}"
+	if [[ "$LXC_PASSWORD_SET" == "true" ]]; then
+		# chpasswd through a pushed file, not argv: `pct exec -- chpasswd` with the
+		# password on the command line shows it in ps on prox01 and inside the CT.
+		local _tmp _pwfile="/tmp/.strata-root-pw"
+		_tmp="$(mktemp)"
+		printf 'root:%s\n' "$LXC_PASSWORD" > "$_tmp"
+		chmod 600 "$_tmp"
+		if pct push "${LXC_ID}" "$_tmp" "$_pwfile" --perms 600 >/dev/null 2>&1 \
+			&& pct exec "${LXC_ID}" -- bash -c "chpasswd < ${_pwfile} && rm -f ${_pwfile}" >/dev/null 2>&1; then
+			echo "  root password   : set (${LXC_PASSWORD_SOURCE})"
+		else
+			echo "WARNING: could not set the root password - do it by hand: pct exec ${LXC_ID} -- passwd root" >&2
+		fi
+		shred -u "$_tmp" 2>/dev/null || rm -f "$_tmp"
+	else
+		echo "  root password   : NOT set (Ubuntu template default) - pct exec ${LXC_ID} -- passwd root"
+	fi
+
+	# mkdir /run/sshd first: ssh.service has RuntimeDirectory=sshd, so while the
+	# service is stopped (dpkg stops it mid-install) /run/sshd is missing and
+	# `sshd -t` fails for a reason that has nothing to do with the drop-in.
+	if pct exec "${LXC_ID}" -- bash -c '
+		mkdir -p /etc/ssh/sshd_config.d /run/sshd
+		rm -f /etc/ssh/sshd_config.d/60-root-password.conf
+		printf "%s\n" "PermitRootLogin yes" "PasswordAuthentication yes" "KbdInteractiveAuthentication no" "UsePAM yes" > /etc/ssh/sshd_config.d/99-root-login.conf
+		chmod 0644 /etc/ssh/sshd_config.d/99-root-login.conf
+		ssh-keygen -A >/dev/null 2>&1
+		sshd -t || exit 1
+		systemctl enable ssh >/dev/null 2>&1
+		systemctl reset-failed ssh >/dev/null 2>&1
+		systemctl restart ssh 2>/dev/null || service ssh restart || exit 1
+		sshd -T 2>/dev/null | grep -qi "^permitrootlogin yes"
+	' >/dev/null 2>&1; then
+		echo "  root login      : PermitRootLogin yes (sshd_config.d/99-root-login.conf), ssh.service enabled"
+	else
+		echo "WARNING: sshd drop-in not verified - check: pct exec ${LXC_ID} -- sshd -t; pct exec ${LXC_ID} -- sshd -T | grep permitrootlogin" >&2
+	fi
+
+	# Ask from outside, the way a client does. The ssh probe logs one failed
+	# password attempt in the CT journal on purpose - it proves the password path
+	# is offered (a key-only server answers "Permission denied (publickey)").
+	if timeout 5 bash -c "exec 3<>/dev/tcp/${_ip}/22" 2>/dev/null; then
+		local _auth
+		_auth="$(ssh -o BatchMode=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${_ip}" true 2>&1 || true)"
+		case "$_auth" in
+			*password*) echo "  ssh probe       : port 22 open, password auth offered" ;;
+			'')        echo "  ssh probe       : port 22 open (no auth reply read)" ;;
+			*)         echo "WARNING: port 22 open but password auth not offered: ${_auth:0:140}" >&2 ;;
+		esac
+	else
+		echo "WARNING: port 22 not reachable from prox01 - check: pct exec ${LXC_ID} -- systemctl status ssh" >&2
+	fi
+	return 0
+}
+
+# Decided before anything is destroyed: an interactive prompt must not be
+# interrupted by a failed rebuild, and --yes runs must not block.
+resolve_root_password
 
 # Built after the option parsing on purpose: --model/--vision must show up in the
 # Proxmox description, and pct create runs much later in this script.
@@ -459,6 +594,16 @@ LXCCONF
 echo "[6/7] Starting LXC ${LXC_ID}..."
 pct start "${LXC_ID}"
 sleep 5
+# Fresh container: pct exec can fail for a few seconds while the container settles.
+for _i in $(seq 1 10); do
+	pct exec "${LXC_ID}" -- true >/dev/null 2>&1 && break
+	echo "  Waiting for the container to come up... ($((_i))/10)"
+	sleep 3
+done
+
+# Root SSH first, before the long bootstrap: the box must be reachable even if the
+# bootstrap dies (compile, mmproj download, pack) or is skipped (--no-bootstrap).
+apply_root_ssh
 
 if [[ "$NO_BOOTSTRAP" == "true" ]]; then
 	echo "[6/7] Skipping bootstrap (--no-bootstrap). Run later:"
@@ -542,5 +687,9 @@ echo "  Image encoder       : vision ${VISION_MODE} (mmproj-Qwen3.8-Flash-Next-B
 echo "  Strata source       : /opt/strata (pinned commit; engine in /opt/strata/engine-cuda12 - setup.py names the dir after the CUDA toolkit, and sm_70 requires 12.x)"
 echo "  V100 freed from     : LXC ${EGPU_LXC_ID} (hlh-ai-engine-egpu, stopped, onboot 0, config intact)"
 echo "  Host driver pinned  : $NVIDIA_DRIVER_VERSION_SHORT (branch $DRIVER_BRANCH) CUDA $CUDA_MAJOR Volta V100 32GB sm70"
-echo "  Shell into the CT   : ssh root@${LXC_IP_CONFIG%%/*} (root password; PermitRootLogin yes) - or pct exec ${LXC_ID} from prox01"
+echo "  Shell into the CT   : ssh root@${LXC_IP_CONFIG%%/*} (root password + PermitRootLogin yes) - or pct exec ${LXC_ID} from prox01"
+if [[ "$LXC_PASSWORD_SET" == "true" && "$LXC_PASSWORD_SOURCE" == "generated" ]]; then
+	echo "  CT root password    : ${LXC_PASSWORD}   <- generated, printed ONCE here and stored nowhere"
+	echo "                      change it: pct exec ${LXC_ID} -- passwd root   (or pass --root-password next time)"
+fi
 echo "Verify inside LXC: nvidia-smi -L && systemctl status strata && curl -s http://127.0.0.1:80/health"

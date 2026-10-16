@@ -26,15 +26,21 @@ Active items in progress. These are the current focus areas.
   Rollback if 0.1.43 misbehaves: `STRATA_COMMIT=fb58e0dbc8399662c0e47c76578c6e878b14f6cf ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`
   Rollback if vision breaks the text path: `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --vision no --yes`
 - [x] **SSH into the CT** — the rebuilt CT had **no working SSH path at all**
-  (`ssh root@192.168.1.15` → `Permission denied (publickey,password)`;
-  `PermitRootLogin without-password` + empty `/root/.ssh`). Fixed live
-  2026-10-16 and in the IaC (0.5.1): drop-in
-  `/etc/ssh/sshd_config.d/60-root-password.conf` → `PermitRootLogin yes` +
-  `PasswordAuthentication yes`, `sshd -t`-gated, `ssh.service` restarted,
-  re-checked with `sshd -T`. Confirmed the password path is reached
-  (`Failed password for root from 192.168.1.81` on a deliberate wrong-password
-  attempt). Root's password is set (`passwd -S root` → `P`) — use it; keys are
-  still not provisioned (BACKLOG).
+  (`ssh root@192.168.1.15` → `Permission denied (publickey,password)`). The 0.5.1
+  fix did **not** survive a rebuild: its `sshd -t` gate deleted the drop-in
+  (dpkg stops `ssh.service` + `ssh.socket` mid-apt, `RuntimeDirectory=sshd`
+  removes `/run/sshd`, so the test fails on an unrelated missing dir — journal:
+  `Closed ssh.socket` at 03:01:38, `sshd_config.d` left empty, `sshd -T` →
+  `without-password`), and nothing in the deploy ever set a root password, which
+  Ubuntu templates leave unset. Fixed live 2026-10-16 (drop-in
+  `/etc/ssh/sshd_config.d/99-root-login.conf`, `systemctl enable ssh`,
+  `sshd -T` → `permitrootlogin yes`, listening on `:22`, probe from the
+  workstation answers `Permission denied (publickey,password)`) and in the IaC
+  (0.5.3): the deploy script sets the root password (`--root-password` /
+  `LXC_PASSWORD` / prompt / generated) and applies the drop-in host-side right
+  after `pct start`, before the bootstrap. The live CT's root password was set
+  by hand (`pct enter 115` → `passwd root`); keys are still not provisioned
+  (BACKLOG).
 - [ ] **FQDN access is blocked by Strata's DNS-rebinding guard** — reaching
   `http://hlh-ai-engine-strata.mizertech.net/` returns
   `403 {"type":"forbidden","message":"Host 'hlh-ai-engine-strata.mizertech.net' is not allowed"}`

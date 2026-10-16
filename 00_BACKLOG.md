@@ -52,13 +52,14 @@ in the codebase.
 - LXC snapshot before model upgrades (Strata data is on the ZFS mount; rootfs
   holds the engine build).
 - Optional: `LimitCPU`/`LimitAS` hardening once usage is characterized.
-- SSH keys: the bootstrap now enables root **password** login (0.5.1), but still
-  installs no `authorized_keys`, so direct `ssh root@192.168.1.15` depends on a
-  password being set in the CT (an Ubuntu template's root starts without one).
-  A `--ssh-key FILE` on the deploy script, pushed into `/root/.ssh/authorized_keys`
-  before the bootstrap runs, would make the direct path work on a greenfield
-  rebuild with no manual step — and would let `PermitRootLogin` go back to
-  `prohibit-password`.
+- SSH keys: since 0.5.3 the deploy script sets the CT root **password** and
+  enables root password login right after `pct start`, so the direct
+  `ssh root@192.168.1.15` path works on a greenfield rebuild with no manual
+  step — but it is still password-only, and a password is the weaker of the two
+  options on a LAN-reachable root shell. A `--ssh-key FILE` on the deploy script,
+  pushed into `/root/.ssh/authorized_keys` at the same point, would let
+  `PermitRootLogin` go back to `prohibit-password` and make
+  `--root-password` optional instead of load-bearing.
 - `allowed_hosts` is now IaC-managed (0.5.2, default
   `hlh-ai-engine-strata.mizertech.net`). Two follow-ups: apply it to the live CT
   (needs the ~6 min strata restart, command in 10_ACTIVE), and revisit the scope

@@ -5,6 +5,87 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-10-16
+
+### Fixed (`ssh root@192.168.1.15` still refused after a rebuild)
+
+Two independent bugs stacked up, so a rebuilt CT had **no working SSH path at
+all** even though 0.5.1 claimed to have fixed it:
+
+1. **The 0.5.1 drop-in deleted itself.** The bootstrap gated the drop-in on a
+   bare `sshd -t` and removed the file when the test failed. `ssh.service` has
+   `RuntimeDirectory=sshd`, so while the service is stopped `/run/sshd` does not
+   exist and `sshd -t` fails on something that has nothing to do with the
+   drop-in — and dpkg stops `ssh.service` **and** `ssh.socket` mid-way through
+   the `[1/6]` apt install. Live evidence from the 03:00 rebuild: journal shows
+   `Stopping ssh.service` / `Closed ssh.socket` at 03:01:38, the
+   `sshd_config.d` directory mtime is 03:14:26 (write + delete in the same
+   second) and it was empty afterwards, `sshd -T` →
+   `permitrootlogin without-password`. The WARNING scrolled past in the
+   bootstrap output.
+2. **Nothing ever set a root password.** Ubuntu's LXC template ships root with
+   no password, so even a correct `PermitRootLogin yes` answers
+   `Permission denied`. The sibling repos already do this during deploy
+   (`lab-opskit/create-lxc.sh` `[4/6] Setting root password`,
+   `hlh-ai-engine-vllm` `LXC_PASSWORD`); Strata's deploy did not.
+
+### Added
+
+- `--root-password PASS` / `LXC_PASSWORD=…` on the deploy script, plus an
+  interactive prompt (hidden, confirmed twice) when stdin is a TTY, plus a
+  generated hex password printed **once** in the summary for `--yes`/cron runs.
+  Applied with `chpasswd` fed from a `pct push`ed temp file (mode 600, shredded
+  on the host, removed in the CT) — never in argv, where `ps` would show it.
+  Nothing is stored in the repo or in the LXC config.
+- Root SSH is now applied **host-side right after `pct start`, before the
+  bootstrap** (`apply_root_ssh`), so it also works with `--no-bootstrap` and
+  survives a bootstrap that dies during the compile/mmproj download/pack.
+  Followed by a real probe from prox01: TCP/22 open + an
+  `ssh -o PreferredAuthentications=password` handshake that must answer
+  `password` (a key-only server answers `publickey` only). The probe logs one
+  deliberate failed attempt in the CT journal.
+- `systemctl enable ssh` — dpkg leaves ssh **stopped** after configuring
+  `openssh-server`, which is why the rebuilt box was not even listening on 22
+  until someone started it by hand.
+
+### Changed
+
+- Drop-in renamed `60-root-password.conf` → **`99-root-login.conf`**, the name
+  `lab-opskit/create-lxc.sh` and `hlh-ai-engine-vllm` already use, with the same
+  four lines (`PermitRootLogin yes`, `PasswordAuthentication yes`,
+  `KbdInteractiveAuthentication no`, `UsePAM yes`). Both scripts delete the old
+  `60-` file, so a re-run migrates.
+- The bootstrap's `sshd -t` gate now creates `/run/sshd` first, and on failure
+  re-tests **without** the drop-in: if the config fails either way the failure
+  is pre-existing and the drop-in is kept (with a warning); it is only removed
+  when it is actually the cause. No more silent revert to Ubuntu defaults.
+  Both scripts also `systemctl reset-failed ssh` before restarting — a failed
+  start leaves the unit rate-limited (`start request repeated too quickly`) and
+  then `restart` refuses to run at all (hit live while testing this).
+
+### Live evidence (2026-10-16)
+
+- Fixed box: `/etc/ssh/sshd_config.d/99-root-login.conf` present,
+  `sshd -T` → `permitrootlogin yes` / `passwordauthentication yes`,
+  `ssh.service` `enabled` + `active`, listening on `0.0.0.0:22`,
+  `faillock --user root` empty (no PAM lockout from the earlier failures).
+  Probe from the workstation: `Permission denied (publickey,password)` — the
+  password path is offered (before the fix: `Permission denied (publickey)`).
+- Deploy-side path validated against the live CT: the exact
+  `pct exec -- bash -c '…'` drop-in block reports verified OK, and the
+  push-file + `chpasswd` mechanism was exercised against a throwaway user with a
+  password containing `$`, backticks, quotes, spaces and a comma (set OK, user
+  removed, no temp file left on either side). The live root password was left
+  untouched.
+- New failure branch exercised live: with a deliberately broken
+  `sshd_config.d/bad.conf`, the bootstrap block **kept** the drop-in and warned
+  (`sshd -t fails with AND without the drop-in - kept it`) instead of deleting
+  it; after removing the breakage the same block reported
+  `SSH: PermitRootLogin yes + PasswordAuthentication yes` /
+  `root has a password set - ssh root@192.168.1.15 works now`.
+- Prompt paths (`n`, matching pair, mismatch, empty) and the non-interactive
+  generate path were unit-tested against the extracted function.
+
 ## [0.5.2] - 2026-10-16
 
 ### Fixed (the endpoint was unreachable under its own name)
