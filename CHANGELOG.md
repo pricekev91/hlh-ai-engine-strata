@@ -19,11 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   demand, and decode stays near-flat as context grows (sparse attention).
 - `--pool-workers` 10 -> **13** (12 physical cores + host thread, matching the
   engine's one-worker-per-core pinning; 10 was right for the old 9 usable).
-- First-round benchmark (n=2, warm iteration): decode short-ctx 59.4 -> 48.0
-  tok/s, decode @38K 49.5 -> 47.7, warm prefill @38K 322 -> 595 tok/s. The 2x
-  context costs a few percent of decode; the cores help prefill, not decode.
-  Extended ladder (75K/~120K prompts, all three configs) run 2026-10-22;
-  percentages in the bench report (`ai-tmp/strata-bench-2026-10-22.md`).
+- Benchmark (2026-10-22/23, 3 configs x 6-test ladder x2, prompts to ~120K):
+  decode steady-state (38K/75K/120K ctx) 51.7 -> 53.9 (24c) -> 53.1 tok/s
+  (256K) = +3%, noise. Prefill 589 -> 567 -> 572 tok/s = -3%, noise. The
+  2x context costs nothing measurable at runtime (TTFT @120K ~212 s in all
+  configs); the extra cores neither help nor hurt (decode is GPU-bound,
+  prefill is expert-streaming-bound). An earlier round suggested cores
+  doubled prefill - cold-page-cache artifact, corrected here. Full report:
+  `ai-tmp/strata-bench-2026-10-22.md` on the workstation.
 - Live state already on the new baseline (CT 115 cores, `/opt/strata/strata-iq3_s.json`).
   Pre-change backups on the CT: `strata-iq3_s.json.bak-p1` (12c/128K/pool10),
   `.bak-p2` (24c/128K/pool13). Engine restart cost after the change: ~12 min
