@@ -20,7 +20,7 @@ stops LXC 111 (`hlh-ai-engine-egpu`, llama.cpp, Qwen3.8-27B) and sets it to
 | LXC ID / hostname | `115` / `hlh-ai-engine-strata` |
 | IP / FQDN | `192.168.1.15` / `hlh-ai-engine-strata.mizertech.net` |
 | OS / type | Ubuntu 24.04 (noble), privileged, `nesting=1,keyctl=1,fuse=1` |
-| Resources | 12 cores, **55 GB RAM** (26.7 GiB pinned experts + runtime + mmap page-cache headroom — see RAM sizing), 512 MB swap, 64 GB rootfs (`RaidZ1-6TB`) |
+| Resources | 24 cores (12 physical, all host threads; was 12 until 2026-10-22), **55 GB RAM** (26.7 GiB pinned experts + runtime + mmap page-cache headroom — see RAM sizing), 512 MB swap, 64 GB rootfs (`RaidZ1-6TB`) |
 | GPU | **Tesla V100 GV100GL 32 GB** (`c5:00.0`, `10de:1df0`, cc 7.0) via OCuLink — single chip, `nvidia0` |
 | Host driver | R580 `580.65.06` (last branch supporting Volta) on `6.14.11-9-pve` (6.17+ breaks 550/580 closed DKMS) |
 | CUDA | **12.8** (final toolkit with sm_70; CUDA 13 dropped sm_60/sm_70) |
@@ -79,9 +79,9 @@ What `--vision gpu` adds to the bootstrap:
   text; here the expert hit rate (94–95 %) *is* the decode lever, so check
   `strata-iq3_s.log` after the rebuild.
 - **Escape hatches**: `--vision-tokens N` shrinks what one picture becomes
-  (setup default 1024 on gpu) if the encoder does not fit beside the 128 K KV;
+  (setup default 1024 on gpu) if the encoder does not fit beside the 256 K KV;
   `--vision cpu` keeps every expert slot and pays ~3 s/picture at 300 tokens on
-  cores the `--pool-workers 10` expert pool also wants; `vram_elastic: true` +
+  cores the `--pool-workers 13` expert pool also wants; `vram_elastic: true` +
   `vision.elastic: true` loads the encoder on demand and drops it after
   `elastic_idle_s` (NVIDIA-only; upstream measured it on an AMD card only).
 
@@ -121,7 +121,7 @@ What that does, in order:
 5. `[4/7]` Ensure the SSD dataset `rpool/strata-models` (mountpoint
    `/strata-models`) and seed the IQ3_S shard pair onto it (idempotent; copies
    from `/srv/ai/models` if not already on SSD). Then create LXC 115:
-   privileged, 12 cores, 55 GB RAM, 64 GB rootfs on `RaidZ1-6TB`,
+   privileged, 24 cores, 55 GB RAM, 64 GB rootfs on `RaidZ1-6TB`,
    `mp0 /srv/ai/models` + `mp1 /strata-models → /srv/ssd-models`,
    IP `192.168.1.15/24` gw `.1`, `onboot 1`.
 6. `[5/7]` GPU passthrough (same pattern as 111): cgroup allows
@@ -133,7 +133,7 @@ What that does, in order:
      (exact-match FATAL gate — NVML requires userspace == host kernel driver),
    - Strata 0.1.43 at pinned `7695859aa13a` → `/opt/strata`,
    - `STRATA_EXPERIMENTAL_SM60=1 ./setup.sh --setup --family qwen --model IQ3_S
-     --context 131072 --kv k8v4 --vision gpu --gpu 0 --port 80 --host 0.0.0.0
+     --context 262144 --kv k8v4 --vision gpu --gpu 0 --port 80 --host 0.0.0.0
      --data-dir /srv/ai/models/strata --gguf-dir /srv/ssd-models --low-ram auto
      --no-start --yes`
      (venv + pinned deps, llama.cpp fetch, **engine compile ~10–40 min**,

@@ -102,6 +102,13 @@ Active items in progress. These are the current focus areas.
 
 - [ ] Watch stability (strata.service restarts, ZFS page-cache cold loads,
   any sm_70 kernel issues in `dmesg`).
+- [x] **Baseline change: 24-core CT + 256K context** — DONE 2026-10-22 (IaC
+  0.5.4). `pct set 115 -cores 24` applied live (the old 12-core allocation only
+  exposed 9 physical cores; the engine pins one expert-pool worker per physical
+  core), `--max-context 131072 -> 262144`, `--pool-workers 10 -> 13`. Live
+  probe: 75,531-token prompt loaded clean (RAM 39/56 GB, VRAM 32.3/32.8 GB),
+  decode 54.4 tok/s at 75K ctx. Extended before/after ladder (12C/128K vs
+  24C/128K vs 24C/256K, prompts to ~120K) run 2026-10-22 — see CHANGELOG 0.5.4.
 - [ ] Expert profile re-adapt: hit rate sits at 89.7% vs the 94–95.5% baseline
   after Phase 1/2 — confirm it climbs back over the next days.
 - [ ] Decide 111's fate: keep as revert fallback (onboot 0) or retire the

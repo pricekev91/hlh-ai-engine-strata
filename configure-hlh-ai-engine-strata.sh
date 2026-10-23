@@ -50,7 +50,7 @@ Options:
 	               README "Vision (images)".
 	               cpu: no VRAM cost (the expert cache keeps every slot), about
 	               3 s per picture at 300 tokens, and it competes with
-	               --pool-workers 10 on these 12 cores.
+	               --pool-workers 13 on these 24 threads.
 	               no: text only (the pre-0.5.0 behaviour).
 	--vision-tokens N  most tokens one picture becomes (setup default: 1024 on
 	               gpu, 300 on cpu). Lower it if the encoder does not fit
@@ -115,7 +115,8 @@ PROFILE_PATH="$PROFILE_DIR/expert-profile.bin"
 # Shards default to the SSD bind (mp1, host rpool/strata-models -> /strata-models).
 # RaidZ1-6TB HDD reads of the 78 GB pair were too slow; SSD validated live 2026-10-09.
 GGUF_DIR="${GGUF_DIR:-/srv/ssd-models}"  # --gguf-dir: local GGUF shards, no model download
-STRATA_CONTEXT="131072"      # 128K - required (16K is unusable for this workload)
+STRATA_CONTEXT="262144"     # 256K - validated live 2026-10-22: 75K-token prompts load,
+                            # decode cost is minor (sparse attention + k8v4 keep it near-flat)
 # Phase 1 tuning (3phase-tunning.md, 2026-10-11): k8v4 = INT8 K (exact attention
 # scores) + rotated Q4_0 V, 816 vs 1056 B/cell - frees ~23% of the 128K KV for
 # expert cache slots. setup.sh accepts int8|q4_0|k8v4.
@@ -427,7 +428,7 @@ SSHEOF
 
 	# --- 4/6 Strata setup: build engine (sm_70 EXPERIMENTAL) + IQ3_S local install ---
 	# This is the long step: venv + pinned deps, llama.cpp fetch, engine compile
-	# (~10-40 min on 12 cores), pack from LOCAL GGUF shards (no ~84 GB download;
+	# (~10-40 min on 24 threads), pack from LOCAL GGUF shards (no ~84 GB download;
 	# only the ~5 GB MTP draft layer is fetched), config + run script.
 	log "[4/6] Strata setup (family=${MODEL_FAMILY} model=${MODEL_NAME} context=${STRATA_CONTEXT} kv=${STRATA_KV} vision=${STRATA_VISION} gpu=${STRATA_GPU} port=${STRATA_PORT})..."
 	log "      STRATA_EXPERIMENTAL_SM60=1 -> builds -DSTRATA_EXPERIMENTAL_SM60=ON (Volta sm_70 community path)"
@@ -517,9 +518,10 @@ SSHEOF
 	#                             QUIT and every 10 min between requests, then
 	#                             pre-filled at start via the existing --expert-profile
 	# Phase 2:
-	#   --pool-workers 10         CPU expert pool: default picked 8 workers + host
-	#                             on the 12-core allocation; 10 serves cache misses
-	#                             faster (host thread drains too = 11 on 12 cores)
+	#   --pool-workers 13         CPU expert pool: one worker per physical core +
+	#                             host thread; 24-thread CT (12 physical cores)
+	#                             since 2026-10-22 (was 8+host=10 on the 12-core
+	#                             allocation, which only exposed 9 physical cores)
 	#   --lookup-chain 2          after MTP drafts, add up to 2 prompt-lookup
 	#                             drafts; window grows to 8 where repeats are likely
 	#   --prompt-cache-tail       one extra checkpoint near the prompt's end
@@ -551,7 +553,7 @@ set_pair("--expert-profile", profile)
 set_pair("--adapt-async", "1")
 set_pair("--expert-profile-save", profile)
 set_pair("--expert-profile-save-every", "10")
-set_pair("--pool-workers", "10")
+set_pair("--pool-workers", "13")
 set_pair("--lookup-chain", "2")
 if "--prompt-cache-tail" not in a:
     a.append("--prompt-cache-tail")

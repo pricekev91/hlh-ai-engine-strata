@@ -153,7 +153,7 @@ LXC_PASSWORD_DECLINED=false # an interactive "no" must not be answered with a ge
 # Live CT 115 is 58320 (2026-10-12); keep IaC in sync or a rebuild silently
 # loses 2 GB of page-cache headroom.
 LXC_MEMORY="58320"
-LXC_CORES="12"
+LXC_CORES="24"
 LXC_SWAP="512"
 LXC_IP_CONFIG="192.168.1.15/24"
 LXC_GATEWAY="192.168.1.1"

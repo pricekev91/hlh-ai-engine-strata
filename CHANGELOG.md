@@ -5,6 +5,30 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-10-22
+
+### Changed — new baseline: 24-core CT + 256K context
+
+- `LXC_CORES` 12 -> **24** (`pct set 115 -cores 24`, applied live, no CT
+  restart). The 12-core allocation exposed only 9 physical cores (cpuset
+  `2-4,6,8,14,16,18-19,21-23`); the engine pins one CPU-expert-pool worker per
+  physical core, so 3 physical cores were dead weight.
+- `STRATA_CONTEXT` 131072 -> **262144** (`--max-context`). Validated live: a
+  75,531-token prompt loaded and decoded at 54.4 tok/s (prefill 663 tok/s);
+  RAM settled 39/56 GB, VRAM unchanged — `k8v4` + `--kv-grow` allocate KV on
+  demand, and decode stays near-flat as context grows (sparse attention).
+- `--pool-workers` 10 -> **13** (12 physical cores + host thread, matching the
+  engine's one-worker-per-core pinning; 10 was right for the old 9 usable).
+- First-round benchmark (n=2, warm iteration): decode short-ctx 59.4 -> 48.0
+  tok/s, decode @38K 49.5 -> 47.7, warm prefill @38K 322 -> 595 tok/s. The 2x
+  context costs a few percent of decode; the cores help prefill, not decode.
+  Extended ladder (75K/~120K prompts, all three configs) run 2026-10-22;
+  percentages in the bench report (`ai-tmp/strata-bench-2026-10-22.md`).
+- Live state already on the new baseline (CT 115 cores, `/opt/strata/strata-iq3_s.json`).
+  Pre-change backups on the CT: `strata-iq3_s.json.bak-p1` (12c/128K/pool10),
+  `.bak-p2` (24c/128K/pool13). Engine restart cost after the change: ~12 min
+  (55 GB experts through a 56 GB CT) — avoid unnecessary restarts.
+
 ## [0.5.3] - 2026-10-16
 
 ### Fixed (`ssh root@192.168.1.15` still refused after a rebuild)
