@@ -226,7 +226,9 @@ try:
     d = json.load(sys.stdin); print(d.get("model") or d.get("model_name") or "?")
 except Exception:
     print("(not answering)")' 2>/dev/null || echo '(not answering)')"
-  state="$(ct systemctl is-active "$SERVICE" 2>/dev/null | tr -d '\r')"
+  # systemctl is-active exits 3 for an inactive/missing unit; with set -e +
+  # pipefail that killed the script before it printed anything.
+  state="$(ct systemctl is-active "$SERVICE" 2>/dev/null | tr -d '\r' || true)"
   printf 'strata  LXC %s  service %s  serving %s\n' "$LXC" "${state:-?}" "${model:-?}"
   printf '  config   %s\n' "${cfgpath:-none}"
   printf '  settings %s\n' "$(summarize "$(live_cfg_json)")"
