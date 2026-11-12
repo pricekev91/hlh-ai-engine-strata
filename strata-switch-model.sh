@@ -429,8 +429,16 @@ if [ "$FROM_HDD" = 0 ]; then
     log "  freed $(gib "$(stat -c %s "$f")") GiB: $(basename "$f" | short)"
     run rm -f "$f" "$f.done"
   done
-  AVAIL=$(( $(zfs list -o avail -H rpool/strata-models | numfmt --from=iec) ))
-  [ $AVAIL -ge $NEED ] || die "still only $(gb "$AVAIL") free on rpool/strata-models, need $(gb "$NEED")"
+  # ZFS accounts the blocks freed by the unlinks a moment later; reading avail
+  # immediately used to abort with the pre-delete figure even though the space
+  # was already being freed. Give it up to 30 s to catch up.
+  AVAIL=0
+  for _w in {1..30}; do
+    AVAIL=$(( $(zfs list -o avail -H rpool/strata-models | numfmt --from=iec) ))
+    [ "$AVAIL" -ge "$NEED" ] && break
+    sleep 1
+  done
+  [ "$AVAIL" -ge "$NEED" ] || die "still only $(gb "$AVAIL") free on rpool/strata-models, need $(gb "$NEED") after 30 s"
   run copy_to_ssd "$SRC1" "$SSD_HOST_DIR/$NAME1"
   run sh -c "printf 'whole (checked against its own tensor directory)' > '$SSD_HOST_DIR/$NAME1.done'"
   if [ -n "$PLE_FROM" ]; then
