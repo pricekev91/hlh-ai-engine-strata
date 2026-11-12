@@ -4,6 +4,32 @@ All notable changes to this repository are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This repo's version line is independent of the Strata engine pin (see
+[docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md) § Versioning note); the pin is
+recorded in each release entry.
+
+## [0.5.5] - 2026-11-12
+
+### Changed — engine pin 0.1.43 → 0.2.11 (engine 0.1.57), first bump under the upgrade policy
+
+- **`STRATA_COMMIT` pinned to `0bdcef4682c5371f7bcf130c41791c7849d78205`
+  (v0.2.11, engine 0.1.57, tagged 2026-11-05 — the source the Qwen
+  Linux-CUDA engine packages were built from).** Lag at bump: ~3,045 commits
+  / 32 days behind upstream `main`.
+- **New: [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md)** — candidate =
+  latest upstream tag ≥ 7 days old ("main − 7", snapped to a tag, never a raw
+  main commit) + scoped-review checklist + bench gate + one-command rollback.
+- **Scoped review `7695859..0bdcef468`: PASS.** All 13 serve flags intact;
+  `STRATA_EXPERIMENTAL_SM60` gate unchanged (still required for cc 7.0);
+  CUDA 12.x still supported. Lands with this bump: the community Volta/Pascal
+  perf-PR group (35 commits, engine 0.1.46), the V100 card-admission fix, and
+  cuda12 packages that now ship sm_60/61/70 (#3503). No breaking changes on
+  our path (window is app/Metal/DeepSeek/catalog churn + two serve fixes).
+- **Rollback:** `STRATA_COMMIT=7695859aa13afb248bdb4d36f9b2e95707db079d
+  ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`.
+- **Pending:** nuke/rebuild of LXC 115 with the new pin (`10_ACTIVE.md`).
+  Pre-flight: back up `expert-profile.bin` + active config; record the 0.5.4
+  bench ladder and `/health` + `/v1/models` output first.
 
 ## [0.5.4] - 2026-10-22
 

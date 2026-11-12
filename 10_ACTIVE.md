@@ -2,6 +2,20 @@
 
 Active items in progress. These are the current focus areas.
 
+## Active (V100 LXC 115 Strata sm_70) — nuke/rebuild on Strata 0.2.11 (engine 0.1.57)
+
+- [ ] **Nuke and rebuild LXC 115 on the 0.5.5 pin** — `0bdcef468` (0.2.11,
+  engine 0.1.57), first bump under `docs/UPGRADE_POLICY.md` (7-day-old tag;
+  scoped review PASS recorded in CHANGELOG 0.5.5).
+  Pre-flight: `cp /srv/ai/models/strata/data/iq3_s_abliterated/expert-profile.bin ~/backup/`
+  + record the 0.5.4 bench ladder and `/health` + `/v1/models` output.
+  **Pull the repo on prox01 first** (the deploy runs from the prox01 checkout).
+  Deploy: `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes` (new pin is the default).
+  Verify: `/health` `images: true`, `/v1/models` `["text","image"]`, one real
+  picture, bench ladder vs the 0.5.4 baseline, expert hit rate in `strata-iq3_s.log`.
+  Rollback: `STRATA_COMMIT=7695859aa13afb248bdb4d36f9b2e95707db079d ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`.
+  Record before/after numbers here and in CHANGELOG when done.
+
 ## Active (V100 LXC 115 Strata sm_70) — rebuild on Strata 0.1.43
 
 - [x] **Nuke and rebuild LXC 115 on Strata 0.1.43 + vision** — DONE 2026-10-16

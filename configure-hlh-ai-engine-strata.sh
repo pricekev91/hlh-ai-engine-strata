@@ -72,24 +72,24 @@ EOF
 # --- PINNED VERSIONS (V100 Volta cc 7.0) ---
 # R580 580.65.06 = last driver supporting Volta (host kernel driver, installed via .run --dkms).
 # CUDA 12.8 = final toolkit with sm_70 (CUDA 13 dropped sm_60/sm_70; Strata needs CUDA 12.x).
-# Strata: v0.1.43 - the sm_70 experimental path is unchanged (STRATA_EXPERIMENTAL_SM60=1,
-# CUDA 12.x source build; still present in 0.1.43 setup.py#experimental_sm60 and the
-# CMakeLists STRATA_EXPERIMENTAL_SM60 option). Chosen over 0.1.41 for decode: 0.1.42 is
-# +13-16% decode on one NVIDIA GPU (up to +30% where the CPU outruns PCIe - this board's
-# V100-over-OCuLink case), 0.1.43 adds +5-11% on Tesla P100 / RTX 30-series under Linux.
-# CAVEAT: 0.1.42 turned on two NVIDIA defaults that change answers slightly -
+# Strata: v0.2.11 (engine 0.1.57) - chosen by the 7-day tag policy (docs/UPGRADE_POLICY.md;
+# scoped review of 0.1.43 -> 0.2.11 PASS: all serve flags intact, sm_70 path unchanged).
+# The sm_70 experimental path is unchanged (STRATA_EXPERIMENTAL_SM60=1, CUDA 12.x source
+# build; the CMake gate base < 75 still requires the flag). This bump lands upstream's
+# community Volta/Pascal perf-PR group (35 commits, engine 0.1.46), the V100 card-admission
+# fix, and cuda12 packages that now ship sm_60/61/70 (#3503).
+# CAVEAT (unchanged since 0.1.42): two NVIDIA defaults change answers slightly -
 # STRATA_ROUTE_TAIL_SKIP=7 (skip experts ranked 7th+ in every window of a miss) and the
 # measured PCIe share. Set STRATA_ROUTE_TAIL_SKIP=0 and STRATA_PCIE_FRAC_DEFAULT=old in
-# the unit's Environment= lines to get 0.1.41-identical answers at the cost of the speed.
-# Also carries: RAM-resident prompts #1353, under-RAM Linux decode #1194, the hung-engine
-# watchdog #1317/#1407, the quoted-tool-call security fix (0.1.40.1).
+# the unit's Environment= lines to get old-identical answers at the cost of the speed.
+# Rollback pin: 7695859aa13afb248bdb4d36f9b2e95707db079d (0.1.43) - CHANGELOG 0.5.5.
 CUDA_VERSION="${CUDA_VERSION:-12.8.0-1}"
 CUDA_MAJOR="${CUDA_MAJOR:-12.8}"
 NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.65.06}"
 DRIVER_BRANCH="${DRIVER_BRANCH:-580}"
 STRATA_REPO="https://github.com/Niko1221/Strata.git"
-STRATA_VERSION="${STRATA_VERSION:-0.1.43}"
-STRATA_COMMIT="${STRATA_COMMIT:-7695859aa13afb248bdb4d36f9b2e95707db079d}"   # 0.1.43
+STRATA_VERSION="${STRATA_VERSION:-0.2.11}"
+STRATA_COMMIT="${STRATA_COMMIT:-0bdcef4682c5371f7bcf130c41791c7849d78205}"   # 0.2.11 (engine 0.1.57)
 STRATA_DIR="/opt/strata"
 STRATA_MODEL_DIR="/srv/ai/models/strata"
 MODEL_FAMILY="qwen"

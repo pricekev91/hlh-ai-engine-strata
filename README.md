@@ -24,7 +24,7 @@ stops LXC 111 (`hlh-ai-engine-egpu`, llama.cpp, Qwen3.8-27B) and sets it to
 | GPU | **Tesla V100 GV100GL 32 GB** (`c5:00.0`, `10de:1df0`, cc 7.0) via OCuLink — single chip, `nvidia0` |
 | Host driver | R580 `580.65.06` (last branch supporting Volta) on `6.14.11-9-pve` (6.17+ breaks 550/580 closed DKMS) |
 | CUDA | **12.8** (final toolkit with sm_70; CUDA 13 dropped sm_60/sm_70) |
-| Engine | **Strata 0.1.43** pinned `7695859aa13a`, built from source **`-DSTRATA_EXPERIMENTAL_SM60=ON`** (Volta community path, Strata #295/#236) |
+| Engine | **Strata 0.2.11** (engine 0.1.57) pinned `0bdcef4682c5`, built from source **`-DSTRATA_EXPERIMENTAL_SM60=ON`** (Volta community path, Strata #295/#236); pin policy: [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md) |
 | Model | Qwen3.8-Flash-Next **IQ3_S** — low-RAM mode (32 GB card holds the hot experts, RAM the rest), 128 K context, int8 KV, **vision on** (GPU encoder, since 0.5.0) |
 | Model shards | `/srv/ssd-models` (host **`rpool/strata-models`** on the **SSD pool** → LXC `/srv/ssd-models`, bind `mp1`) — the 78 GB IQ3_S pair on the RaidZ1-6TB HDD pool was too slow; SSD is fast (validated live 2026-10-09) |
 | Model packs | `/srv/ai/models/strata` (host `RaidZ1-6TB/ai/models` → LXC `/srv/ai/models/strata`, same-path bind `mp0`) — packed model, MTP, tokenizer, **`models/mmproj-…-BF16.gguf` (0.9 GB image encoder)** |
@@ -131,7 +131,7 @@ What that does, in order:
    `--bootstrap-inside`:
    - CUDA 12.8 toolkit + driver-branch userspace **apt-pinned to `580.65.06`**
      (exact-match FATAL gate — NVML requires userspace == host kernel driver),
-   - Strata 0.1.43 at pinned `7695859aa13a` → `/opt/strata`,
+   - Strata 0.2.11 (engine 0.1.57) at pinned `0bdcef4682c5` → `/opt/strata`,
    - `STRATA_EXPERIMENTAL_SM60=1 ./setup.sh --setup --family qwen --model IQ3_S
      --context 262144 --kv k8v4 --vision gpu --gpu 0 --port 80 --host 0.0.0.0
      --data-dir /srv/ai/models/strata --gguf-dir /srv/ssd-models --low-ram auto
@@ -226,10 +226,11 @@ hlh-ai-engine-strata/
   git history predate the reset.
 - Change management: PRs + review for code changes; docs can be direct.
 - Pinned externals:
-  - Strata `7695859aa13afb248bdb4d36f9b2e95707db079d` (0.1.43) — bump
-    deliberately (rebuilds the engine; re-run `setup.sh` in the LXC after).
-    The IaC pins this; the live LXC 115 still runs 0.1.41 until the rebuild
-    (`10_ACTIVE.md`).
+  - Strata `0bdcef4682c5371f7bcf130c41791c7849d78205` (0.2.11, engine 0.1.57) —
+    bumped deliberately per [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md)
+    (rebuilds the engine; re-run `setup.sh` in the LXC after). The IaC pins
+    0.2.11; the live LXC 115 still runs 0.1.43 until the pending nuke/rebuild
+    (`10_ACTIVE.md`). Rollback pin: `7695859aa13a` (0.1.43).
   - CUDA `12.8.0-1` (final sm_70 toolkit) + userspace `580.65.06` (last Volta driver).
     Do **not** move to CUDA 13.x (drops sm_70) or driver 590+ (drops Volta).
 - Scope: this repo owns LXC 115 lifecycle, Strata install, and the 111→115
