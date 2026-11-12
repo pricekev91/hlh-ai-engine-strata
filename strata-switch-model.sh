@@ -419,16 +419,25 @@ run ct systemctl stop "$SERVICE"
 
 NATIVE="$CT_SSD_DIR/$NAME1"; PLE="$CT_SSD_DIR/$NAME2"
 if [ "$FROM_HDD" = 0 ]; then
-  for f in "${PREV_SHARDS[@]}"; do
-    [ -n "$PLE_FROM" ] && [ "$f" = "$(basename "$PLE_FROM")" ] && continue
-    if [ -e "$SSD_HOST_DIR/$f" ]; then log "  freed $(gib "$(stat -c %s "$SSD_HOST_DIR/$f")") GiB: $(basename "$f" | short)"; run rm -f "$SSD_HOST_DIR/$f" "$SSD_HOST_DIR/$f.done"; fi
+  # The SSD dataset is a disposable cache: free EVERY GGUF before the copy, not
+  # just the shards named by the live config. A stale pair (or an unreadable
+  # config) used to leave the pool full and the copy would fail; keep only the
+  # byte-identical PLE shard we are about to hard-link.
+  for f in "$SSD_HOST_DIR"/*.gguf; do
+    [ -e "$f" ] || continue
+    [ -n "$PLE_FROM" ] && [ "$f" = "$PLE_FROM" ] && continue
+    log "  freed $(gib "$(stat -c %s "$f")") GiB: $(basename "$f" | short)"
+    run rm -f "$f" "$f.done"
   done
   AVAIL=$(( $(zfs list -o avail -H rpool/strata-models | numfmt --from=iec) ))
   [ $AVAIL -ge $NEED ] || die "still only $(gb "$AVAIL") free on rpool/strata-models, need $(gb "$NEED")"
   run copy_to_ssd "$SRC1" "$SSD_HOST_DIR/$NAME1"
   run sh -c "printf 'whole (checked against its own tensor directory)' > '$SSD_HOST_DIR/$NAME1.done'"
   if [ -n "$PLE_FROM" ]; then
-    [ "$PLE_FROM" = "$SSD_HOST_DIR/$NAME2" ] || run ln "$PLE_FROM" "$SSD_HOST_DIR/$NAME2"
+    if [ "$PLE_FROM" != "$SSD_HOST_DIR/$NAME2" ]; then
+      run ln "$PLE_FROM" "$SSD_HOST_DIR/$NAME2"
+      run rm -f "$PLE_FROM" "$PLE_FROM.done"   # the inode now lives under $NAME2
+    fi
     run sh -c "printf 'whole (checked against its own tensor directory)' > '$SSD_HOST_DIR/$NAME2.done'"
   else
     run copy_to_ssd "$SRC2" "$SSD_HOST_DIR/$NAME2"
