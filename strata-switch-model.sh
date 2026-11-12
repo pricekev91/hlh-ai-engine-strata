@@ -411,7 +411,16 @@ cp "$UNIT" "$UNIT.bak-pre-$TAG-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 PREV_CFG_PATH="$CUR_CFG"
 PREV_SHARDS=()
 while IFS= read -r f; do [ -n "$f" ] && PREV_SHARDS+=( "$(basename "$f")" ); done \
-  < <(ct sh -c "grep -o -- '--native [^ ]*\|--ple-gguf [^ ]*' '$PREV_CFG_PATH'" 2>/dev/null | tr -d '\r' | awk '{print $2}')
+  < <(ct cat "$PREV_CFG_PATH" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    a = json.load(sys.stdin)["args"]
+except Exception:
+    sys.exit(0)
+for i, x in enumerate(a):
+    if x in ("--native", "--ple-gguf") and i + 1 < len(a):
+        print(a[i + 1])
+')
 log "previous model's SSD shards: ${PREV_SHARDS[*]:-none}"
 
 START=$SECONDS
