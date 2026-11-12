@@ -8,6 +8,14 @@ This repo's version line is independent of the Strata engine pin (see
 [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md) § Versioning note); the pin is
 recorded in each release entry.
 
+## [0.5.7] - 2026-11-12
+
+### Added (switcher v1.1.0) — numbered interactive menu
+
+- `show_models` now prints a `#` column; interactive mode accepts the menu
+  number **or** the tag name (menu order = sort order; invalid numbers die
+  with the valid range). v1.0.x only took tag names.
+
 ## [0.5.6] - 2026-11-12
 
 ### Added — the model switcher enters the repo (was an untracked script on prox01)

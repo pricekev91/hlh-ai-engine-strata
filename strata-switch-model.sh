@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # strata-switch-model.sh
-# Version: 1.0.1
+# Version: 1.1.0
 # Description: Model switcher for the Strata AI engine (LXC 115, Tesla V100 GV100 32GB, sm_70 EXPERIMENTAL).
 #              Runs on the PROXMOX HOST (prox01) - it needs pct, zfs and the host path of the SSD
 #              model dataset (/strata-models = rpool/strata-models = CT /srv/ssd-models).
@@ -17,7 +17,7 @@
 #      verifies the model name; on failure it reverts the unit/config and re-seeds the old shards.
 #
 # Usage:
-#   strata-switch-model.sh                      interactive: show models, prompt for one
+#   strata-switch-model.sh                      interactive: show models, switch by number or tag
 #   strata-switch-model.sh --list               show current model + settings + all models, no changes
 #   strata-switch-model.sh --to TAG [--yes]     switch to TAG
 #   strata-switch-model.sh --dry-run --to TAG   every check + the generated config, but NO stop/copy/delete/restart
@@ -35,7 +35,7 @@
 #   --strict           treat a size mismatch as fatal
 set -euo pipefail
 
-VERSION="1.0.1"
+VERSION="1.1.0"
 LXC="${STRATA_LXC:-115}"
 MODEL_HOST_DIR="/srv/ai/models"                 # CT mp0  -> /srv/ai/models
 SSD_HOST_DIR="/strata-models"                   # rpool/strata-models, CT mp1 -> /srv/ssd-models
@@ -239,14 +239,15 @@ except Exception:
 }
 
 show_models() {
-  printf '\n  %-21s %-12s %-14s %s\n' MODEL SHARDS PACK ON_SSD
-  local t sz1 sz2 note on
+  printf '\n  %-2s %-21s %-12s %-14s %s\n' '#' MODEL SHARDS PACK ON_SSD
+  local t n=0 sz1 sz2 note on
   for t in $(printf '%s\n' "${!TAG_SRC1[@]}" | sort); do
+    n=$((n+1))
     sz1="$(stat -c %s "${TAG_SRC1[$t]}")"; sz2="$(stat -c %s "${TAG_SRC2[$t]}" 2>/dev/null || echo 0)"
     pack_experts "${TAG_PACK[$t]}" && note="experts.bin" || note="dense only"
     pack_ok "${TAG_PACK[$t]}" || note="MISSING"
     [ -e "$SSD_HOST_DIR/$(basename "${TAG_SRC1[$t]}")" ] && on="yes" || on="-"
-    printf '  %-21s %3s+%3s GiB   %-14s %s\n' "$t" "$(gib "$sz1")" "$(gib "$sz2")" "$note" "$on"
+    printf '  %-2s %-21s %3s+%3s GiB   %-14s %s\n' "$n" "$t" "$(gib "$sz1")" "$(gib "$sz2")" "$note" "$on"
   done
   if [ "${VERBOSE:-0}" = 1 ]; then
     local t2; for t2 in $(printf '%s\n' "${!TAG_SRC1[@]}" | sort); do printf '  %s\n    %s\n' "$t2" "${TAG_SRC1[$t2]}"; done
@@ -271,8 +272,15 @@ if [ "$ROLLBACK" = 1 ]; then
 fi
 if [ "$MODE" = "interactive" ]; then
   show_current; show_models; echo
-  printf '  switch to? [%s] ' "$(printf '%s ' "${!TAG_SRC1[@]}")"; read -r TO
+  # Accept the menu number or the tag (menu order = the sort order show_models printed).
+  mapfile -t MENU_TAGS < <(printf '%s\n' "${!TAG_SRC1[@]}" | sort)
+  printf '  switch to? [number or tag] '; read -r TO
   [ -n "${TO:-}" ] || die "aborted"
+  if [[ "$TO" =~ ^[0-9]+$ ]]; then
+    [ "$TO" -ge 1 ] && [ "$TO" -le "${#MENU_TAGS[@]}" ] || die "no menu number $TO (1-${#MENU_TAGS[@]})"
+    TO="${MENU_TAGS[$((TO-1))]}"
+    log "menu choice $TO -> $TO"
+  fi
 fi
 TAG="$(resolve_tag "$TO")" || die "unknown model '$TO' (try --list)"
 SRC1="${TAG_SRC1[$TAG]}"; SRC2="${TAG_SRC2[$TAG]}"; PACK="${TAG_PACK[$TAG]}"
