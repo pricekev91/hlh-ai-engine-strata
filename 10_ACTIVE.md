@@ -4,17 +4,18 @@ Active items in progress. These are the current focus areas.
 
 ## Active (V100 LXC 115 Strata sm_70) — nuke/rebuild on Strata 0.2.11 (engine 0.1.57)
 
-- [ ] **Nuke and rebuild LXC 115 on the 0.5.5 pin** — `0bdcef468` (0.2.11,
-  engine 0.1.57), first bump under `docs/UPGRADE_POLICY.md` (7-day-old tag;
-  scoped review PASS recorded in CHANGELOG 0.5.5).
-  Pre-flight: `cp /srv/ai/models/strata/data/iq3_s_abliterated/expert-profile.bin ~/backup/`
-  + record the 0.5.4 bench ladder and `/health` + `/v1/models` output.
-  **Pull the repo on prox01 first** (the deploy runs from the prox01 checkout).
-  Deploy: `./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes` (new pin is the default).
-  Verify: `/health` `images: true`, `/v1/models` `["text","image"]`, one real
-  picture, bench ladder vs the 0.5.4 baseline, expert hit rate in `strata-iq3_s.log`.
-  Rollback: `STRATA_COMMIT=7695859aa13afb248bdb4d36f9b2e95707db079d ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`.
-  Record before/after numbers here and in CHANGELOG when done.
+- [x] **Pin bumped 0.1.43 -> 0.2.11 (`0bdcef468`, engine 0.1.57)** — first bump
+  under `docs/UPGRADE_POLICY.md` (7-day-old tag; scoped review PASS, CHANGELOG 0.5.5).
+- [x] **LXC 115 rebuilt on 0.2.11** — 2026-11-12 ~09:46; `/health` serving
+  `qwen3.8-flash-next-iq3_s`, `images: true`. Note: the rebuild hit the seed
+  deadlock (foreign pair on the SSD, CHANGELOG 0.5.6) and needed the purge;
+  0.5.6 fixes it in the IaC.
+- [ ] **Clean redeploy from the 0.5.6 tree + record before/after bench** —
+  `cd /root/git/hlh-ai-engine-strata && git pull &&
+  ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes` (this also
+  installs `strata-switch-model.sh` and resets `active.json`), then re-run the
+  0.5.4 bench ladder and log decode/prefill/hit-rate deltas here.
+  Rollback if 0.2.11 misbehaves: `STRATA_COMMIT=7695859aa13afb248bdb4d36f9b2e95707db079d ./deploy-hlh-ai-engine-strata.sh --skip-host-driver --yes`.
 
 ## Active (V100 LXC 115 Strata sm_70) — rebuild on Strata 0.1.43
 

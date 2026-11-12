@@ -157,12 +157,35 @@ Useful flags:
 | `--vision V` | `gpu` (default) \| `cpu` \| `no` — forwarded to the bootstrap as `--vision` (see [Vision (images)](#vision-images)) |
 | `--vision-tokens N` | Max tokens one picture becomes (setup default 1024 on gpu) — lower it if the encoder does not fit beside the 128 K KV |
 
+## Switching models
+
+Strata model switching is not `ln -s`: a quant needs its **pack** (indexed
+experts + tokenizer), its **shard pair on the SSD** (Strata reads the PLE
+n-gram table unbuffered on the token path — tok/s depends on SSD), and gets a
+**per-model expert profile**. `strata-switch-model.sh` (installed to
+`/srv/ai/models/` by every deploy; runs on the Proxmox host) does all of it:
+
+```sh
+./strata-switch-model.sh --list                 # what is serving + what is switchable
+./strata-switch-model.sh --dry-run --to iq3_xxs # every check + config diff, no changes
+./strata-switch-model.sh --to iq3_xxs           # stop, reseed SSD, swap config, health-gate
+./strata-switch-model.sh --rollback             # back to the model in active.json
+./strata-switch-model.sh --build-pack TAG       # build a missing pack (~15-45 min) and exit
+```
+
+It derives the new config from the **live** one (all tuning flags carry over),
+reuses the byte-identical PLE shard-2 via hardlink when switching (saves
+26.8 GiB of copy — the PLE table is quant-independent), auto-builds missing
+packs, and on a failed `/health` it **auto-rolls-back**: unit, config and a
+re-seed of the previous model's SSD shards. `active.json` (state) is reset by
+every deploy to whatever it seeded.
+
 ## Deployment Model
 
 | Aspect | hlh-ai-engine-egpu (111) | hlh-ai-engine-strata (115) |
 |---|---|---|
 | Engine | llama.cpp (CUDA) | Strata (CUDA, MoE) |
-| Model | Qwen3.8-27B GGUF | Qwen3.8-Flash-Next IQ2_XS (packed shards) |
+| Model | Qwen3.8-27B GGUF | Qwen3.8-Flash-Next IQ3_S (packed shards) |
 | CUDA | 12.8 | 12.8 (sm_70 experimental build) |
 | GPU wiring | cgroup + `/dev/nvidia*` bind | identical |
 | Host driver | 580.65.06 | identical (shared) |
@@ -214,8 +237,10 @@ hlh-ai-engine-strata/
 ├── 10_ACTIVE.md
 ├── 90_DONE.md
 ├── .gitignore
-├── deploy-hlh-ai-engine-strata.sh     # host-side: LXC 115 + V100 wiring + 111 cutover
-└── configure-hlh-ai-engine-strata.sh  # bootstrap: CUDA 12.8 + Strata sm_70 build + IQ2_XS + systemd
+├── docs/UPGRADE_POLICY.md             # pin policy: 7-day-old tag + scoped review + rollback
+├── deploy-hlh-ai-engine-strata.sh     # host-side: LXC 115 + V100 wiring + purge/reseed + 111 cutover
+├── configure-hlh-ai-engine-strata.sh  # bootstrap: CUDA 12.8 + Strata sm_70 build + IQ3_S + systemd
+└── strata-switch-model.sh             # host-side: pack/PLE/SSD-aware model switching + auto-rollback
 ```
 
 ## Governance

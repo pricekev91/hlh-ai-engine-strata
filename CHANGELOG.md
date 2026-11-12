@@ -8,6 +8,52 @@ This repo's version line is independent of the Strata engine pin (see
 [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md) § Versioning note); the pin is
 recorded in each release entry.
 
+## [0.5.6] - 2026-11-12
+
+### Added — the model switcher enters the repo (was an untracked script on prox01)
+
+- **`strata-switch-model.sh` v1.0.1** — model switching for Strata is not
+  `ln -s`: it needs pack completeness, PLE-table handling, HDD→SSD seeding,
+  per-tag expert profiles and a health-gated config swap. The switcher does
+  all of it: derives the new config from the LIVE one (every tuning flag
+  carried over), reuses the byte-identical PLE shard-2 via hardlink (quant-
+  independent — saves 26.8 GiB and ~5 min), auto-builds missing packs
+  (`--build-pack`), verifies shard sizes against published values
+  (`--check-hf`/`--strict`), dry-runs with a full config diff, and
+  auto-rolls-back (unit + re-seed of the old shards) when the new model
+  fails `/health`. It lived untracked in prox01's checkout until now.
+- `deploy-…sh` installs the switcher to `${MODEL_HOST_DIR}/` on every deploy
+  (repo is the source of truth for both locations) and resets
+  `strata/active.json` to what the deploy actually seeded, so `--rollback`
+  can never point at a model the rebuild deleted.
+- README: "Switching models" section.
+
+### Fixed (switcher, from the pre-commit review)
+
+- Unreachable pre-delete space check (`… && [ ! -d "$SSD_HOST_DIR" ]` could
+  never fire); the enforceable gate is the post-delete one, now commented.
+- Duplicate `gib()` definition removed.
+- `-h` printed a fixed line slice (2-45); now extracts the header comment
+  block dynamically.
+- `EXP`/`HF` tables documented as verification data for known quants —
+  discovery is dynamic, unknown tags stay switchable.
+
+### Changed — the seed step now purges and reseeds (the 0.2.11 deploy deadlocked here)
+
+- **Rebuild with a non-matching pair on the SSD failed the capacity gate**: the
+  seed looked for the published `${MODEL_QUANT}` pair, found foreign shards
+  (e.g. an abliterated fine-tune pair), matched no pattern, deleted nothing,
+  and refused to copy 78 GB onto a pool already holding 78 GB. That is exactly
+  what stopped the 2026-11-12 cutover at step [4/7].
+- New behavior: when the wanted pair is absent, **verify both HDD source
+  shards exist first** (refuse to purge otherwise), then delete everything in
+  `${MODEL_SSD_HOST_DIR}` (the dataset is disposable; the HDD pool is the
+  source of truth), re-check capacity after the purge, copy the pair, and
+  carry the `.done` markers. When the pair is present it is kept (idempotent).
+- Same run, live: `rpool/strata-models` carried an `abliterated` pair while the
+  IaC seeded the published name — the purge made the reseed complete (engine
+  0.1.57 serving `qwen3.8-flash-next-iq3_s` since 2026-11-12 ~09:46).
+
 ## [0.5.5] - 2026-11-12
 
 ### Changed — engine pin 0.1.43 → 0.2.11 (engine 0.1.57), first bump under the upgrade policy

@@ -500,54 +500,74 @@ if ! zfs list "$SSD_DATASET" >/dev/null 2>&1; then
 		|| { echo "ERROR: zfs create $SSD_DATASET failed (does SSD pool ${SSD_POOL} exist? override with SSD_POOL=<pool>)" >&2; exit 1; }
 fi
 mkdir -p "${MODEL_SSD_HOST_DIR}"
-# Seed the ${MODEL_QUANT} shard pair onto the SSD (idempotent): skip when already there,
-# copy from the HDD model dir when present; otherwise the bootstrap pre-flight
-# fatals with a clear missing-shard message.
+# Seed the ${MODEL_QUANT} shard pair onto the SSD. The dataset is disposable:
+# the HDD copy under ${MODEL_HOST_DIR} is the source of truth. When the wanted
+# pair is not already present, delete EVERYTHING in the dataset first, then
+# copy - the 128 GB boot pool cannot hold two pairs, and a stale pair (old
+# quant or a fine-tune variant, e.g. abliterated) matching no pattern used to
+# deadlock the seed on the capacity gate below. Refuse to purge unless both
+# HDD source shards exist, so a purge can never strand the box without a model.
 GGUF_STEM="Qwen3.8-Flash-Next-GSQ-RCO-${MODEL_QUANT}"
-# Capacity gate (3phase-tunning.md §3.4): rpool is a 128 GB boot pool with
-# ~9.5G avail when the old quant sits on it. Refuse to seed when there is not
-# room for the full pair + 8G headroom instead of filling the pool mid-copy.
-NEED_BYTES=0
+SSD_PAIR_READY=1
 for _i in 00001 00002; do
-	_f="${GGUF_STEM}-${_i}-of-00002.gguf"
-	if [ ! -s "${MODEL_SSD_HOST_DIR}/${_f}" ] && [ -s "${MODEL_HOST_DIR}/${_f}" ]; then
-		_sz=$(stat -c%s "${MODEL_HOST_DIR}/${_f}" 2>/dev/null || echo 0)
-		NEED_BYTES=$((NEED_BYTES + _sz))
-	elif [ ! -s "${MODEL_SSD_HOST_DIR}/${_f}" ] && [ -s "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" ]; then
-		_sz=$(stat -c%s "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" 2>/dev/null || echo 0)
-		NEED_BYTES=$((NEED_BYTES + _sz))
-	fi
+	[ -s "${MODEL_SSD_HOST_DIR}/${GGUF_STEM}-${_i}-of-00002.gguf" ] || SSD_PAIR_READY=0
 done
-if [ "$NEED_BYTES" -gt 0 ]; then
+if [ "$SSD_PAIR_READY" = "1" ]; then
+	echo "  SSD pair present: ${GGUF_STEM}-*.gguf - keeping it"
+else
+	SRC_PATHS=()
+	NEED_BYTES=0
+	for _i in 00001 00002; do
+		_f="${GGUF_STEM}-${_i}-of-00002.gguf"
+		if [ -s "${MODEL_HOST_DIR}/${_f}" ]; then
+			_src="${MODEL_HOST_DIR}/${_f}"
+		elif [ -s "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" ]; then
+			_src="${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}"
+		else
+			echo "ERROR: ${_f} is not on the HDD under ${MODEL_HOST_DIR} - refusing to purge ${MODEL_SSD_HOST_DIR}" >&2
+			exit 1
+		fi
+		SRC_PATHS+=("$_src")
+		NEED_BYTES=$((NEED_BYTES + $(stat -c%s "$_src")))
+	done
+	echo "  SSD pair absent - purging all of ${MODEL_SSD_HOST_DIR} (any quant/variant), then seeding ${MODEL_QUANT}..."
+	find "${MODEL_SSD_HOST_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+	# Capacity gate (3phase-tunning. §3.4) AFTER the purge: refuse to start the
+	# copy unless the pool holds the full pair + 8G headroom even now.
 	AVAIL_BYTES=$(zfs get -Hp -o value available "$SSD_DATASET" 2>/dev/null || echo 0)
 	MIN_BYTES=$((NEED_BYTES + 8 * 1024 * 1024 * 1024))
 	if [ "$AVAIL_BYTES" -lt "$MIN_BYTES" ]; then
-		echo "ERROR: not enough space on ${SSD_DATASET} to seed ${MODEL_QUANT} (need $(numfmt --to=iec "$NEED_BYTES") + 8G headroom, avail $(numfmt --to=iec "$AVAIL_BYTES")). Delete the old quant from ${MODEL_SSD_HOST_DIR} first." >&2
+		echo "ERROR: not enough space on ${SSD_DATASET} to seed ${MODEL_QUANT} (need $(numfmt --to=iec "$NEED_BYTES") + 8G headroom, avail $(numfmt --to=iec "$AVAIL_BYTES") even after purging)." >&2
 		exit 1
 	fi
+	for _src in "${SRC_PATHS[@]}"; do
+		_f="$(basename "$_src")"
+		echo "  Seeding ${_f} from $(dirname "$_src") (HDD -> SSD, a few minutes)..."
+		if command -v rsync >/dev/null 2>&1; then
+			rsync -a --info=progress2 "$_src" "${MODEL_SSD_HOST_DIR}/${_f}"
+		else
+			cp "$_src" "${MODEL_SSD_HOST_DIR}/${_f}"
+		fi
+		if [ -s "${_src}.done" ]; then
+			cp -a "${_src}.done" "${MODEL_SSD_HOST_DIR}/${_f}.done"
+		fi
+	done
 fi
-for _i in 00001 00002; do
-	_f="${GGUF_STEM}-${_i}-of-00002.gguf"
-	if [ -s "${MODEL_SSD_HOST_DIR}/${_f}" ]; then
-		echo "  SSD shard present: ${_f}"
-	elif [ -s "${MODEL_HOST_DIR}/${_f}" ]; then
-		echo "  Seeding ${_f} from ${MODEL_HOST_DIR} (HDD -> SSD, a few minutes)..."
-		if command -v rsync >/dev/null 2>&1; then
-			rsync -a --info=progress2 "${MODEL_HOST_DIR}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
-		else
-			cp "${MODEL_HOST_DIR}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
-		fi
-	elif [ -s "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" ]; then
-		echo "  Seeding ${_f} from ${MODEL_HOST_DIR}/${MODEL_QUANT} (HDD -> SSD, a few minutes)..."
-		if command -v rsync >/dev/null 2>&1; then
-			rsync -a --info=progress2 "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
-		else
-			cp "${MODEL_HOST_DIR}/${MODEL_QUANT}/${_f}" "${MODEL_SSD_HOST_DIR}/${_f}"
-		fi
-	else
-		echo "WARNING: ${_f} found on neither ${MODEL_SSD_HOST_DIR} nor ${MODEL_HOST_DIR} - bootstrap will fatal unless shards are provided" >&2
+# The model switcher (strata-switch-model.sh) runs on the Proxmox host; the repo
+# is its source of truth, so install it onto the model dataset every deploy.
+if [ -s "${SCRIPT_DIR}/strata-switch-model.sh" ]; then
+	mkdir -p "${MODEL_HOST_DIR}"
+	install -m 0755 "${SCRIPT_DIR}/strata-switch-model.sh" "${MODEL_HOST_DIR}/strata-switch-model.sh"
+	echo "  Installed strata-switch-model.sh -> ${MODEL_HOST_DIR}/"
+	# Keep the switcher state honest: this deploy seeds exactly ${MODEL_QUANT},
+	# so --rollback must not point at a model the rebuild deleted from the SSD.
+	if [ -d "${MODEL_HOST_DIR}/strata" ]; then
+		printf '{\n "tag": "%s",\n "prev": "",\n "at": "%s"\n}\n' \
+			"$(printf '%s' "$MODEL_QUANT" | tr '[:upper:]' '[:lower:]')" "$(date -Is)" \
+			> "${MODEL_HOST_DIR}/strata/active.json"
+		echo "  Reset ${MODEL_HOST_DIR}/strata/active.json -> tag=$(printf '%s' "$MODEL_QUANT" | tr '[:upper:]' '[:lower:]')"
 	fi
-done
+fi
 echo "[4/7] Creating privileged Ubuntu LXC (${LXC_ID}, ${LXC_NAME}) on ${POOL}..."
 mkdir -p "${MODEL_HOST_DIR}"
 chown 0:0 "${MODEL_HOST_DIR}"
