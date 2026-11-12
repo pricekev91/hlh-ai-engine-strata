@@ -429,25 +429,28 @@ run ct systemctl stop "$SERVICE"
 NATIVE="$CT_SSD_DIR/$NAME1"; PLE="$CT_SSD_DIR/$NAME2"
 if [ "$FROM_HDD" = 0 ]; then
   # The SSD dataset is a disposable cache: free EVERY GGUF before the copy, not
-  # just the shards named by the live config. A stale pair (or an unreadable
-  # config) used to leave the pool full and the copy would fail; keep only the
-  # byte-identical PLE shard we are about to hard-link.
+  # just the shards named by the live config. Keep only the byte-identical PLE
+  # shard we are about to hard-link. Project the space after the purge BEFORE
+  # deleting: ZFS reports the freed blocks asynchronously, so reading avail
+  # right after the unlinks raced the accounting and aborted with the old
+  # figure. The projection below is the only gate; after it passes, delete and
+  # copy without re-reading avail.
+  FREED=0
+  for f in "$SSD_HOST_DIR"/*.gguf; do
+    [ -e "$f" ] || continue
+    [ -n "$PLE_FROM" ] && [ "$f" = "$PLE_FROM" ] && continue
+    FREED=$((FREED + $(stat -c %s "$f")))
+  done
+  AVAIL=$(( $(zfs list -o avail -H rpool/strata-models | numfmt --from=iec) ))
+  if [ $((AVAIL + FREED)) -lt $((NEED + HEADROOM_GIB * 1024 * 1024 * 1024)) ]; then
+    die "not enough space on rpool/strata-models even after purging: $(gb "$AVAIL") free + $(gb "$FREED") to free, need $(gb "$NEED") + ${HEADROOM_GIB} GiB"
+  fi
   for f in "$SSD_HOST_DIR"/*.gguf; do
     [ -e "$f" ] || continue
     [ -n "$PLE_FROM" ] && [ "$f" = "$PLE_FROM" ] && continue
     log "  freed $(gib "$(stat -c %s "$f")") GiB: $(basename "$f" | short)"
     run rm -f "$f" "$f.done"
   done
-  # ZFS accounts the blocks freed by the unlinks a moment later; reading avail
-  # immediately used to abort with the pre-delete figure even though the space
-  # was already being freed. Give it up to 30 s to catch up.
-  AVAIL=0
-  for _w in {1..30}; do
-    AVAIL=$(( $(zfs list -o avail -H rpool/strata-models | numfmt --from=iec) ))
-    [ "$AVAIL" -ge "$NEED" ] && break
-    sleep 1
-  done
-  [ "$AVAIL" -ge "$NEED" ] || die "still only $(gb "$AVAIL") free on rpool/strata-models, need $(gb "$NEED") after 30 s"
   run copy_to_ssd "$SRC1" "$SSD_HOST_DIR/$NAME1"
   run sh -c "printf 'whole (checked against its own tensor directory)' > '$SSD_HOST_DIR/$NAME1.done'"
   if [ -n "$PLE_FROM" ]; then
